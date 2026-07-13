@@ -285,6 +285,11 @@ def _iter_search_contexts(search_result: Any) -> list[Any]:
         return []
     if isinstance(search_result, list):
         return search_result
+    if isinstance(search_result, dict):
+        contexts = []
+        for key in ("memories", "resources", "skills"):
+            contexts.extend(search_result.get(key) or [])
+        return contexts
 
     contexts = []
     for attr in ("memories", "resources", "skills"):
@@ -311,16 +316,25 @@ def select_single_search_contexts(
     for raw_rank, context in enumerate(_iter_search_contexts(search_result), start=1):
         if raw_rank > limit:
             break
-        uri = getattr(context, "uri", "")
+        if isinstance(context, dict):
+            uri = context.get("uri", "")
+            score = context.get("score", 0.0)
+            abstract = context.get("abstract", "")
+            created_at = context.get("created_at", "")
+        else:
+            uri = getattr(context, "uri", "")
+            score = getattr(context, "score", 0.0)
+            abstract = getattr(context, "abstract", "")
+            created_at = getattr(context, "created_at", "")
         if not uri or is_single_search_excluded_uri(uri):
             continue
         selected.append(
             {
                 "raw_rank": raw_rank,
                 "uri": uri,
-                "score": getattr(context, "score", 0.0),
-                "abstract": getattr(context, "abstract", ""),
-                "created_at": getattr(context, "created_at", ""),
+                "score": score,
+                "abstract": abstract,
+                "created_at": created_at,
             }
         )
     return selected

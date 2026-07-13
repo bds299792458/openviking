@@ -454,11 +454,27 @@ def _wait_task(client: Any, task_id: str | None, timeout: int) -> dict[str, Any]
 
 
 def _read_memory_text(client: Any, match: Any) -> tuple[str, str | None]:
+    uri = match.get("uri", "") if isinstance(match, dict) else getattr(match, "uri", "")
     try:
-        return client.read(getattr(match, "uri", "")), None
+        return client.read(uri), None
     except Exception as exc:
-        fallback = getattr(match, "abstract", "") or getattr(match, "overview", "") or ""
+        if isinstance(match, dict):
+            fallback = match.get("abstract", "") or match.get("overview", "") or ""
+        else:
+            fallback = getattr(match, "abstract", "") or getattr(match, "overview", "") or ""
         return fallback, f"{type(exc).__name__}: {exc}"
+
+
+def _memory_matches(result: Any) -> list[Any]:
+    if isinstance(result, dict):
+        return list(result.get("memories") or [])
+    return list(getattr(result, "memories", []) or [])
+
+
+def _match_value(match: Any, key: str, default: Any = None) -> Any:
+    if isinstance(match, dict):
+        return match.get(key, default)
+    return getattr(match, key, default)
 
 
 def _probe_corpus(args: argparse.Namespace, client: Any) -> dict[str, Any]:
@@ -467,14 +483,14 @@ def _probe_corpus(args: argparse.Namespace, client: Any) -> dict[str, Any]:
         target_uri=args.search_uri,
         limit=args.retrieval_top_k,
     )
-    memories = list(getattr(result, "memories", []) or [])
+    memories = _memory_matches(result)
     reads = []
     for match in memories[: args.retrieval_top_k]:
-        uri = getattr(match, "uri", "")
+        uri = _match_value(match, "uri", "")
         text, read_error = _read_memory_text(client, match)
         row = {
             "uri": uri,
-            "score": getattr(match, "score", None),
+            "score": _match_value(match, "score", None),
             "text_chars": len(text),
             "non_empty": bool(str(text).strip()),
         }
@@ -682,11 +698,11 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
             rows: list[dict[str, Any]] = []
             try:
                 result = client.search(query=query, target_uri=args.search_uri, limit=search_limit)
-                memories = list(getattr(result, "memories", []) or [])
+                memories = _memory_matches(result)
                 blocks = []
                 injected_chars_used = 0
                 for index, match in enumerate(memories[:search_limit], 1):
-                    uri = getattr(match, "uri", "")
+                    uri = _match_value(match, "uri", "")
                     text, read_error = _read_memory_text(client, match)
                     clean_text = text.strip()
                     block_text = f"Memory {index} ({uri}):\n{clean_text}" if clean_text else ""
