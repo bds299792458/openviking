@@ -25,10 +25,14 @@ typed memory selection 是轻量 benchmark-side 改动，没有修改 OpenViking
 
 ## 结果
 
-| Method | Cases | Correct | Wrong | Accuracy | Avg Memory Chars | Avg Memory Prompt Tokens | Avg Total Tokens |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| OpenViking baseline | 50 | 29 | 21 | 58.00% | 21203.30 | 5014.90 | - |
-| OpenViking typed memory selection | 50 | 38 | 12 | 76.00% | 6166.94 | 1481.96 | 7764.94 |
+| Method | Run | Cases | Correct | Wrong | Accuracy | Avg OV Retrieval Time | Avg E2E Answer Time | Avg Memory Chars | Avg Memory Prompt Tokens |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| OpenViking baseline | original | 50 | 29 | 21 | 58.00% | - | 13.27s | 21203.30 | 5014.90 |
+| OpenViking typed memory selection | original | 50 | 38 | 12 | 76.00% | - | 63.99s | 6166.94 | 1481.96 |
+| OpenViking score memory | timing rerun | 50 | 36 | 14 | 72.00% | 0.64s | 12.28s | 21203.30 | 5014.90 |
+| OpenViking typed memory selection | timing rerun | 50 | 35 | 15 | 70.00% | 0.74s | 9.29s | 6157.08 | 1479.70 |
+
+注意：README 的 LoCoMo 表格强调 OpenViking 相对 native/auto-memory 可以显著降低 `Avg. Query Time` 和输入 tokens。这里的 `Avg OV Retrieval Time` 是 benchmark 脚本内部统计的 OpenViking 检索、读取、rerank/typed selection、字符预算和 prompt 构造耗时，不包含 LLM completion；`Avg E2E Answer Time` 才更接近用户等待一次回答的端到端耗时。README 的 `Avg. Query Time` 是完整 agent 集成 benchmark 的查询耗时，通常还包含 agent 框架调度、上下文加载、模型调用和系统开销，因此和本文的 `Avg OV Retrieval Time` 量级不应直接对齐。
 
 按类别：
 
@@ -76,15 +80,15 @@ typed memory selection 是轻量 benchmark-side 改动，没有修改 OpenViking
 
 ## 结论
 
-LoCoMo 50 QA 结果支持 DEGA-style 思路迁移到长期记忆场景：不是简单扩大 memory top-k，而是把 memory 先转成 typed evidence，再在预算内选择更高边际价值的上下文。
+LoCoMo 50 QA 结果支持继续探索 DEGA-style 思路迁移到长期记忆场景：不是简单扩大 memory top-k，而是把 memory 先转成 typed evidence，再在预算内选择更高边际价值的上下文。但准确率收益不能只看单次 run。原始 run 中 typed selection 从 58.00% 提升到 76.00%，而带计时重跑中 typed selection 为 70.00%，score memory 为 72.00%，说明当前轻量 typed 规则对准确率的改善还不稳定。
 
-本轮提升同时降低了注入 memory 规模：
+更稳定的结论是 typed selection 降低了注入 memory 规模，并在 timing rerun 中降低了端到端回答耗时：
 
-- accuracy：58.00% -> 76.00%。
-- avg memory chars：21203.30 -> 6166.94。
-- avg memory prompt tokens：5014.90 -> 1481.96。
+- avg memory chars：约 21203 -> 约 6157。
+- avg memory prompt tokens：约 5015 -> 约 1480。
+- avg E2E answer time：12.28s -> 9.29s。
 
-这说明“更少但更结构化的 memory”可以比“大段注入 memory”更有效。后续应继续补充：
+这说明“更少但更结构化的 memory”在效率上已经成立；要把效率优势稳定转成准确率优势，后续应继续补充：
 
 1. `event_time` 与 `source_session`，解决时间线错误。
 2. `memory_key` 与 entity-level 去重，避免泛化 memory 覆盖具体事实。

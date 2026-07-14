@@ -24,6 +24,16 @@ def category_label(category: str) -> str:
     return category or "<missing>"
 
 
+def get_float(data: dict, key: str) -> float | None:
+    value = data.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Statistics for judge result csv")
     parser.add_argument(
@@ -46,6 +56,12 @@ def main():
     total_memory_chars = 0
     total_completion_tokens = 0
     total_tokens = 0
+    total_query_time = 0.0
+    total_llm_completion_time = 0.0
+    total_e2e_answer_time = 0.0
+    query_time_count = 0
+    llm_completion_time_count = 0
+    e2e_answer_time_count = 0
     valid_rows = 0
     total_iteration = 0
     by_category: dict[str, dict[str, int]] = defaultdict(
@@ -61,6 +77,12 @@ def main():
     valid_only_total_memory_chars = 0
     valid_only_total_completion_tokens = 0
     valid_only_total_tokens = 0
+    valid_only_total_query_time = 0.0
+    valid_only_total_llm_completion_time = 0.0
+    valid_only_total_e2e_answer_time = 0.0
+    valid_only_query_time_count = 0
+    valid_only_llm_completion_time_count = 0
+    valid_only_e2e_answer_time_count = 0
     valid_only_rows = 0
     valid_only_total_iteration = 0
 
@@ -120,6 +142,21 @@ def main():
                     total_completion_tokens += token_data.get("completion_tokens", 0)
                     total_tokens += token_data.get("total_tokens", 0)
 
+                    query_time = get_float(token_data, "query_time_sec")
+                    if query_time is not None:
+                        total_query_time += query_time
+                        query_time_count += 1
+
+                    llm_completion_time = get_float(token_data, "llm_completion_sec")
+                    if llm_completion_time is not None:
+                        total_llm_completion_time += llm_completion_time
+                        llm_completion_time_count += 1
+
+                    e2e_answer_time = get_float(token_data, "e2e_answer_time_sec")
+                    if e2e_answer_time is not None:
+                        total_e2e_answer_time += e2e_answer_time
+                        e2e_answer_time_count += 1
+
                     if is_valid:
                         valid_only_total_prompt_tokens += token_data.get("prompt_tokens", 0)
                         valid_only_total_memory_prompt_tokens += token_data.get(
@@ -128,6 +165,15 @@ def main():
                         valid_only_total_memory_chars += token_data.get("memory_chars", 0)
                         valid_only_total_completion_tokens += token_data.get("completion_tokens", 0)
                         valid_only_total_tokens += token_data.get("total_tokens", 0)
+                        if query_time is not None:
+                            valid_only_total_query_time += query_time
+                            valid_only_query_time_count += 1
+                        if llm_completion_time is not None:
+                            valid_only_total_llm_completion_time += llm_completion_time
+                            valid_only_llm_completion_time_count += 1
+                        if e2e_answer_time is not None:
+                            valid_only_total_e2e_answer_time += e2e_answer_time
+                            valid_only_e2e_answer_time_count += 1
                 except json.JSONDecodeError:
                     pass
 
@@ -151,6 +197,15 @@ def main():
     avg_memory_chars = total_memory_chars / valid_rows if valid_rows > 0 else 0.0
     avg_completion_tokens = total_completion_tokens / valid_rows if valid_rows > 0 else 0.0
     avg_total_tokens = total_tokens / valid_rows if valid_rows > 0 else 0.0
+    avg_query_time = total_query_time / query_time_count if query_time_count > 0 else None
+    avg_llm_completion_time = (
+        total_llm_completion_time / llm_completion_time_count
+        if llm_completion_time_count > 0
+        else None
+    )
+    avg_e2e_answer_time = (
+        total_e2e_answer_time / e2e_answer_time_count if e2e_answer_time_count > 0 else None
+    )
 
     valid_only_avg_prompt_tokens = (
         valid_only_total_prompt_tokens / valid_only_rows if valid_only_rows > 0 else 0.0
@@ -167,6 +222,21 @@ def main():
     valid_only_avg_total_tokens = (
         valid_only_total_tokens / valid_only_rows if valid_only_rows > 0 else 0.0
     )
+    valid_only_avg_query_time = (
+        valid_only_total_query_time / valid_only_query_time_count
+        if valid_only_query_time_count > 0
+        else None
+    )
+    valid_only_avg_llm_completion_time = (
+        valid_only_total_llm_completion_time / valid_only_llm_completion_time_count
+        if valid_only_llm_completion_time_count > 0
+        else None
+    )
+    valid_only_avg_e2e_answer_time = (
+        valid_only_total_e2e_answer_time / valid_only_e2e_answer_time_count
+        if valid_only_e2e_answer_time_count > 0
+        else None
+    )
 
     output_lines = [
         "=== Judge Result Statistics (excluding category=5) ===",
@@ -175,7 +245,23 @@ def main():
         f"Correct: {correct}",
         f"Wrong: {wrong}",
         f"Accuracy: {accuracy:.2%}",
-        f"\nAverage time cost: {avg_time:.2f}s",
+        f"\nAverage time cost (legacy E2E wall time): {avg_time:.2f}s",
+        (
+            "Avg OV retrieval/query time: "
+            + (f"{avg_query_time:.2f}s" if avg_query_time is not None else "N/A")
+        ),
+        (
+            "Avg LLM completion time: "
+            + (
+                f"{avg_llm_completion_time:.2f}s"
+                if avg_llm_completion_time is not None
+                else "N/A"
+            )
+        ),
+        (
+            "Avg E2E answer time: "
+            + (f"{avg_e2e_answer_time:.2f}s" if avg_e2e_answer_time is not None else "N/A")
+        ),
         f"\nAverage iteration: {total_iteration / valid_rows if valid_rows > 0 else 0.0:.2f}",
         "\nToken usage:",
         f"  Total prompt tokens: {total_prompt_tokens}",
@@ -217,6 +303,12 @@ def main():
         and valid_only_total_memory_chars == total_memory_chars
         and valid_only_total_completion_tokens == total_completion_tokens
         and valid_only_total_tokens == total_tokens
+        and valid_only_total_query_time == total_query_time
+        and valid_only_total_llm_completion_time == total_llm_completion_time
+        and valid_only_total_e2e_answer_time == total_e2e_answer_time
+        and valid_only_query_time_count == query_time_count
+        and valid_only_llm_completion_time_count == llm_completion_time_count
+        and valid_only_e2e_answer_time_count == e2e_answer_time_count
     )
     if not valid_only_matches_overall:
         output_lines.extend(
@@ -228,7 +320,31 @@ def main():
                 f"Valid correct: {valid_only_correct}",
                 f"Valid wrong: {valid_only_wrong}",
                 f"Valid accuracy: {valid_only_accuracy:.2%}",
-                f"\nAverage time cost: {valid_only_avg_time:.2f}s",
+                f"\nAverage time cost (legacy E2E wall time): {valid_only_avg_time:.2f}s",
+                (
+                    "Avg OV retrieval/query time: "
+                    + (
+                        f"{valid_only_avg_query_time:.2f}s"
+                        if valid_only_avg_query_time is not None
+                        else "N/A"
+                    )
+                ),
+                (
+                    "Avg LLM completion time: "
+                    + (
+                        f"{valid_only_avg_llm_completion_time:.2f}s"
+                        if valid_only_avg_llm_completion_time is not None
+                        else "N/A"
+                    )
+                ),
+                (
+                    "Avg E2E answer time: "
+                    + (
+                        f"{valid_only_avg_e2e_answer_time:.2f}s"
+                        if valid_only_avg_e2e_answer_time is not None
+                        else "N/A"
+                    )
+                ),
                 f"\nAverage iteration: {valid_only_total_iteration / valid_only_rows if valid_only_rows > 0 else 0.0:.2f}",
                 "\nToken usage:",
                 f"  Total prompt tokens: {valid_only_total_prompt_tokens}",

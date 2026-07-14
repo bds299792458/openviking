@@ -62,18 +62,22 @@ tau2-bench：trajectory memory matched/injected 全覆盖，但 reward 改善不
 
 结果：
 
-| Method | Cases | Correct | Wrong | Accuracy | Avg Memory Chars | Avg Memory Prompt Tokens | Avg Time |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| auto-memory | 50 | 24 | 26 | 48.00% | - | - | 10.79s |
-| OpenViking | 50 | 29 | 21 | 58.00% | 21203.30 | 5014.90 | 13.27s |
-| OpenViking typed memory selection | 50 | 38 | 12 | 76.00% | 6166.94 | 1481.96 | 63.99s |
+| Method | Run | Cases | Correct | Wrong | Accuracy | Avg OV Retrieval Time | Avg E2E Answer Time | Avg Memory Chars | Avg Memory Prompt Tokens |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| auto-memory | original | 50 | 24 | 26 | 48.00% | - | 10.79s | - | - |
+| OpenViking score memory | original | 50 | 29 | 21 | 58.00% | - | 13.27s | 21203.30 | 5014.90 |
+| OpenViking typed memory selection | original | 50 | 38 | 12 | 76.00% | - | 63.99s | 6166.94 | 1481.96 |
+| OpenViking score memory | timing rerun | 50 | 36 | 14 | 72.00% | 0.64s | 12.28s | 21203.30 | 5014.90 |
+| OpenViking typed memory selection | timing rerun | 50 | 35 | 15 | 70.00% | 0.74s | 9.29s | 6157.08 | 1479.70 |
 
 结论：
 
-- OpenViking 在 50 QA 上比 auto-memory 高 10 个百分点。
-- 但 OpenViking 50/50 都注入了 memory，仍有 21 个错误，说明“召回并注入 memory”不等于“模型正确使用 memory”。
+- OpenViking 在原始 50 QA 上比 auto-memory 高 10 个百分点。
+- 但 OpenViking 50/50 都注入了 memory，原始 run 仍有 21 个错误，说明“召回并注入 memory”不等于“模型正确使用 memory”。
 - 错误集中在时间线、事件顺序、相近人物或相近事件混淆，后续需要 memory_type、event_time、source_session、confidence 等结构化字段。
-- typed memory selection 在相同 search50/rerank10/chars30000 设置下达到 38/50，说明把 memory 先类型化、置信度化、去冗余后再注入，比直接注入大段 memory 更有效。
+- typed memory selection 在原始 run 中达到 38/50，但带计时重跑中是 35/50，score memory 是 36/50，说明准确率收益还不稳定，不能只根据单次 run 下结论。
+- 稳定结论是 typed memory 明显降低注入规模：memory chars 从约 21203 降到约 6157，memory prompt tokens 从约 5015 降到约 1480；带计时重跑中 E2E answer time 从 12.28s 降到 9.29s。
+- 表中的 `Avg OV Retrieval Time` 是本地脚本统计的 OpenViking 检索、读取、rerank/typed selection、字符预算和 prompt 构造耗时，不包含 LLM completion。README 中 LoCoMo 表格的 `Avg. Query Time` 是完整 agent 集成 benchmark 的查询耗时，通常包含 agent 框架调度、上下文加载、模型调用和系统开销，因此二者量级不应直接对齐。
 
 ## 3. tau2-bench Agent 经验记忆实验
 

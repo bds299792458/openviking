@@ -686,6 +686,7 @@ def run_vikingbot_chat(
 ) -> tuple[str, dict, float, int, list, list, str]:
     """执行单轮 search + rerank + answer，返回回答、token、耗时、迭代次数、工具和检索轨迹"""
     start_time = time.time()
+    stage_timings: dict[str, float] = {}
     client = SyncHTTPClient(
         url=openviking_url,
         user=sample_id,
@@ -694,46 +695,60 @@ def run_vikingbot_chat(
     try:
         client.initialize()
         target_uri = f"viking://user/{sample_id or 'default'}/memories"
+        search_start = time.time()
         search_result = client.find(
             question,
             target_uri=target_uri,
             limit=single_search_context_limit,
         )
+        stage_timings["search_sec"] = time.time() - search_start
+        select_start = time.time()
         contexts = select_single_search_contexts(
             search_result,
             limit=single_search_context_limit,
         )
+        stage_timings["initial_select_sec"] = time.time() - select_start
         retrieved_uris = [context["uri"] for context in contexts]
 
+        read_start = time.time()
         for context in contexts:
             uri = context["uri"]
             try:
                 context["content"] = client.read(uri, offset=0, limit=-1)
             except Exception as exc:
                 context["content"] = f"[READ ERROR] {exc}"
+        stage_timings["read_sec"] = time.time() - read_start
 
         reranker = build_single_search_reranker()
         rerank_enabled = reranker is not None
         rerank_limit = single_search_rerank_limit
+        rerank_start = time.time()
         contexts, rerank_scores, rerank_error = rerank_single_search_contexts(
             question=question,
             contexts=contexts,
             reranker=reranker,
             limit=rerank_limit,
         )
+        stage_timings["rerank_sec"] = time.time() - rerank_start
+        typed_select_start = time.time()
         if single_search_selection_mode == "typed":
             contexts = select_typed_locomo_contexts(
                 question=question,
                 contexts=contexts,
                 limit=rerank_limit,
             )
+        stage_timings["typed_select_sec"] = time.time() - typed_select_start
+        budget_start = time.time()
         contexts, skipped_context_uris, context_chars = filter_contexts_by_char_budget(
             contexts,
             max_chars=single_search_max_context_chars,
         )
+        stage_timings["char_budget_sec"] = time.time() - budget_start
         context_uris = [context["uri"] for context in contexts]
 
+        prompt_start = time.time()
         prompt = build_single_search_context_prompt(question, question_time, contexts)
+        stage_timings["prompt_build_sec"] = time.time() - prompt_start
         vlm = build_single_search_vlm()
         memory_prompt_tokens, memory_chars, memory_tokenizer = (
             count_retrieved_memory_content_tokens(
@@ -741,13 +756,30 @@ def run_vikingbot_chat(
                 model_name=getattr(vlm, "model", None),
             )
         )
+        query_time_sec = sum(
+            stage_timings.get(key, 0.0)
+            for key in (
+                "search_sec",
+                "initial_select_sec",
+                "read_sec",
+                "rerank_sec",
+                "typed_select_sec",
+                "char_budget_sec",
+                "prompt_build_sec",
+            )
+        )
+        llm_start = time.time()
         raw_response = vlm.get_completion(prompt)
+        stage_timings["llm_completion_sec"] = time.time() - llm_start
         response = _response_text(raw_response)
         token_usage = _token_usage_from_vlm(vlm, raw_response)
         token_usage["memory_prompt_tokens"] = memory_prompt_tokens
         token_usage["memory_chars"] = memory_chars
         token_usage["memory_tokenizer"] = memory_tokenizer
+        token_usage["query_time_sec"] = round(query_time_sec, 6)
+        token_usage["llm_completion_sec"] = round(stage_timings["llm_completion_sec"], 6)
         time_cost = time.time() - start_time
+        token_usage["e2e_answer_time_sec"] = round(time_cost, 6)
         return (
             response,
             token_usage,
@@ -764,6 +796,11 @@ def run_vikingbot_chat(
                     "rerank_scores": rerank_scores,
                     "rerank_error": rerank_error,
                     "selection_mode": single_search_selection_mode,
+                    "stage_timings_sec": {
+                        key: round(value, 6) for key, value in stage_timings.items()
+                    },
+                    "query_time_sec": round(query_time_sec, 6),
+                    "llm_completion_sec": round(stage_timings["llm_completion_sec"], 6),
                     "typed_contexts": [
                         {
                             "uri": context.get("uri", ""),
@@ -791,6 +828,9 @@ def run_vikingbot_chat(
                 "memory_prompt_tokens": 0,
                 "memory_chars": 0,
                 "memory_tokenizer": "approx_chars_div_4",
+                "query_time_sec": 0,
+                "llm_completion_sec": 0,
+                "e2e_answer_time_sec": 0,
             },
             0,
             1,
