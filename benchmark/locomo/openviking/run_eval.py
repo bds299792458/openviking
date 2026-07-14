@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -240,6 +241,39 @@ DEFAULT_SINGLE_SEARCH_CONTEXT_LIMIT = 10
 DEFAULT_SINGLE_SEARCH_RERANK_LIMIT = 10
 DEFAULT_SINGLE_SEARCH_MAX_CONTEXT_CHARS = 4000
 SINGLE_SEARCH_EXCLUDED_BASENAMES = {".abstract.md", ".overview.md"}
+LOCOMO_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "of",
+    "in",
+    "on",
+    "for",
+    "to",
+    "and",
+    "or",
+    "by",
+    "with",
+    "when",
+    "what",
+    "who",
+    "where",
+    "which",
+    "did",
+    "does",
+    "do",
+    "is",
+    "are",
+    "was",
+    "were",
+}
+LOCOMO_DATE_RE = re.compile(
+    r"\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|"
+    r"yesterday|today|tomorrow|week|month|year|summer|winter|spring|autumn|fall|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
 
 
 def get_token_encoding_name(model_name: str | None = None) -> str:
@@ -308,6 +342,115 @@ def is_single_search_excluded_uri(uri: str) -> bool:
     return basename in SINGLE_SEARCH_EXCLUDED_BASENAMES
 
 
+def locomo_tokens(text: str) -> set[str]:
+    return {
+        tok
+        for tok in re.findall(r"[a-z0-9]+", str(text or "").lower())
+        if len(tok) > 1 and tok not in LOCOMO_STOPWORDS
+    }
+
+
+def locomo_question_features(question: str) -> dict[str, bool]:
+    q = str(question or "").lower()
+    return {
+        "temporal": q.startswith("when") or any(token in q for token in ("date", "year", "month", "week", "before", "after")),
+        "identity": any(token in q for token in ("identity", "who is", "who was")),
+        "preference": any(token in q for token in ("like", "love", "prefer", "favorite", "enjoy")),
+        "plan": any(token in q for token in ("plan", "planning", "going to", "will", "want to")),
+    }
+
+
+def infer_locomo_memory_type(content: str, uri: str = "") -> str:
+    text = f"{uri}\n{content}".lower()
+    if any(token in text for token in ("preference", "favorite", "likes", "loves", "enjoys")):
+        return "preference"
+    if LOCOMO_DATE_RE.search(text):
+        return "event"
+    if any(token in text for token in ("identity", "profile", " is a ", " is an ", " works as ")):
+        return "profile"
+    if any(token in text for token in ("plan", "planning", "going to", "will ")):
+        return "plan"
+    return "conversation"
+
+
+def annotate_locomo_contexts(question: str, contexts: list[dict[str, Any]]) -> None:
+    q_tokens = locomo_tokens(question)
+    features = locomo_question_features(question)
+    scores = []
+    for context in contexts:
+        try:
+            scores.append(float(context.get("rerank_score", context.get("score", 0.0)) or 0.0))
+        except (TypeError, ValueError):
+            scores.append(0.0)
+    min_score = min(scores) if scores else 0.0
+    max_score = max(scores) if scores else 1.0
+    denom = max(max_score - min_score, 1e-9)
+
+    for context, raw_score in zip(contexts, scores, strict=False):
+        content = str(context.get("content", "") or "")
+        content_head = content[:1800]
+        content_tokens = locomo_tokens(content_head)
+        lexical_overlap = len(q_tokens & content_tokens) / max(1, len(q_tokens))
+        memory_type = infer_locomo_memory_type(content, str(context.get("uri", "")))
+        score_norm = (raw_score - min_score) / denom
+        type_bonus = 0.0
+        if features["temporal"] and memory_type in {"event", "plan"}:
+            type_bonus += 0.30
+        if features["identity"] and memory_type == "profile":
+            type_bonus += 0.25
+        if features["preference"] and memory_type == "preference":
+            type_bonus += 0.25
+        if features["plan"] and memory_type in {"plan", "event"}:
+            type_bonus += 0.20
+        date_bonus = 0.18 if features["temporal"] and LOCOMO_DATE_RE.search(content_head) else 0.0
+        context["memory_type"] = memory_type
+        context["typed_overlap"] = lexical_overlap
+        context["typed_score_norm"] = score_norm
+        context["typed_confidence"] = max(0.0, min(1.0, 0.45 * score_norm + 0.35 * lexical_overlap + type_bonus + date_bonus))
+        context["typed_uncertainty"] = 1.0 - context["typed_confidence"]
+
+
+def select_typed_locomo_contexts(
+    question: str,
+    contexts: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    annotate_locomo_contexts(question, contexts)
+    selected: list[dict[str, Any]] = []
+    selected_tokens: list[set[str]] = []
+    selected_types: set[str] = set()
+    remaining = list(contexts)
+
+    def redundancy(tokens: set[str]) -> float:
+        if not tokens or not selected_tokens:
+            return 0.0
+        return max(len(tokens & item) / max(1, len(tokens | item)) for item in selected_tokens)
+
+    while remaining and len(selected) < max(1, limit):
+        best = None
+        best_value = -999.0
+        for context in remaining:
+            content_tokens = locomo_tokens(str(context.get("content", "") or "")[:1800])
+            type_bonus = 0.12 if context.get("memory_type") not in selected_types else 0.0
+            value = (
+                float(context.get("typed_confidence", 0.0) or 0.0)
+                + type_bonus
+                - 0.25 * redundancy(content_tokens)
+                - 0.04 * min(1.0, len(str(context.get("content", "") or "")) / 4000.0)
+            )
+            if value > best_value:
+                best = context
+                best_value = value
+        if best is None:
+            break
+        best["typed_marginal_value"] = best_value
+        selected.append(best)
+        selected_types.add(str(best.get("memory_type", "")))
+        selected_tokens.append(locomo_tokens(str(best.get("content", "") or "")[:1800]))
+        remaining = [context for context in remaining if context is not best]
+    return selected
+
+
 def select_single_search_contexts(
     search_result: Any,
     limit: int = DEFAULT_SINGLE_SEARCH_CONTEXT_LIMIT,
@@ -356,15 +499,25 @@ def build_single_search_context_prompt(
 def build_single_search_prompt_search_results(
     contexts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "memory": str(context.get("content", "")),
-            "score": context.get("score", 0.0),
-            "raw_rank": context.get("raw_rank"),
-            "created_at": context.get("created_at", ""),
-        }
-        for context in contexts
-    ]
+    results = []
+    for context in contexts:
+        memory = str(context.get("content", ""))
+        if context.get("memory_type"):
+            memory = (
+                f"[memory_type={context.get('memory_type')}; "
+                f"confidence={float(context.get('typed_confidence', 0.0) or 0.0):.2f}; "
+                f"uncertainty={float(context.get('typed_uncertainty', 0.0) or 0.0):.2f}]\n"
+                + memory
+            )
+        results.append(
+            {
+                "memory": memory,
+                "score": context.get("score", 0.0),
+                "raw_rank": context.get("raw_rank"),
+                "created_at": context.get("created_at", ""),
+            }
+        )
+    return results
 
 
 def count_retrieved_memory_content_tokens(
@@ -529,6 +682,7 @@ def run_vikingbot_chat(
     single_search_rerank_limit: int = DEFAULT_SINGLE_SEARCH_RERANK_LIMIT,
     timeout: int = 300,
     single_search_max_context_chars: int = DEFAULT_SINGLE_SEARCH_MAX_CONTEXT_CHARS,
+    single_search_selection_mode: str = "score",
 ) -> tuple[str, dict, float, int, list, list, str]:
     """执行单轮 search + rerank + answer，返回回答、token、耗时、迭代次数、工具和检索轨迹"""
     start_time = time.time()
@@ -567,6 +721,12 @@ def run_vikingbot_chat(
             reranker=reranker,
             limit=rerank_limit,
         )
+        if single_search_selection_mode == "typed":
+            contexts = select_typed_locomo_contexts(
+                question=question,
+                contexts=contexts,
+                limit=rerank_limit,
+            )
         contexts, skipped_context_uris, context_chars = filter_contexts_by_char_budget(
             contexts,
             max_chars=single_search_max_context_chars,
@@ -603,6 +763,17 @@ def run_vikingbot_chat(
                     "rerank_limit": rerank_limit if rerank_enabled else 0,
                     "rerank_scores": rerank_scores,
                     "rerank_error": rerank_error,
+                    "selection_mode": single_search_selection_mode,
+                    "typed_contexts": [
+                        {
+                            "uri": context.get("uri", ""),
+                            "memory_type": context.get("memory_type"),
+                            "typed_confidence": context.get("typed_confidence"),
+                            "typed_uncertainty": context.get("typed_uncertainty"),
+                            "typed_marginal_value": context.get("typed_marginal_value"),
+                        }
+                        for context in contexts
+                    ],
                     "max_context_chars": single_search_max_context_chars,
                     "context_chars": context_chars,
                     "skipped_context_uris_by_char_limit": skipped_context_uris,
@@ -776,6 +947,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--single-search-selection-mode",
+        choices=("score", "typed"),
+        default="score",
+        help=(
+            "Context selection mode after search/rerank. score keeps the existing "
+            "rerank order; typed applies lightweight memory_type/confidence/budget "
+            "selection inspired by evidence-state packing."
+        ),
+    )
+    parser.add_argument(
         "--debug-print-model-input",
         action="store_true",
         help="Write full model input prompt and retrieved URI trace into the CSV.",
@@ -921,6 +1102,7 @@ def main():
             single_search_context_limit=args.single_search_context_limit,
             single_search_rerank_limit=args.single_search_rerank_limit,
             single_search_max_context_chars=args.single_search_max_context_chars,
+            single_search_selection_mode=args.single_search_selection_mode,
         )
 
         row = {
