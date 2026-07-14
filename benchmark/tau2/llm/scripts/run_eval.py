@@ -360,6 +360,8 @@ def _tau2_command(
             str(budget["prewrite_inject_top_k"]),
             "--retrieval-mode",
             str(strategy.get("retrieval_mode", "first_user")),
+            "--memory-selection-mode",
+            str(strategy.get("memory_selection_mode", "score")),
             "--train-transcript-format",
             _train_transcript_format(strategy),
             "--train-tool-output-max-chars",
@@ -594,6 +596,7 @@ def _build_plan(
                             )
                         ),
                         "retrieval_mode": strategy.get("retrieval_mode"),
+                        "memory_selection_mode": strategy.get("memory_selection_mode", "score"),
                         "train_transcript_format": _train_transcript_format(strategy),
                         "train_include_system_prompt": _enabled(
                             strategy.get("train_include_system_prompt")

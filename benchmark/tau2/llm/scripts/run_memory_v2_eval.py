@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import re
 import shutil
 import sys
 import time
@@ -36,6 +37,85 @@ TRAIN_TRANSCRIPT_OPENVIKING_TEXT = "openviking_text"
 TRAIN_TRANSCRIPT_ROLE_TOOL_BLOCKS = "role_tool_blocks"
 TRAIN_TRANSCRIPT_CUSTOM_LIKE = "custom_like"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
+TAU2_TYPED_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "have",
+    "has",
+    "customer",
+    "service",
+    "before",
+    "executing",
+    "write",
+    "like",
+    "tool",
+    "call",
+    "recent",
+    "context",
+    "observations",
+}
+TAU2_OPERATION_KEYWORDS = {
+    "order_return_exchange": {
+        "return",
+        "returns",
+        "exchange",
+        "exchanges",
+        "refund",
+        "replacement",
+        "item",
+        "product",
+        "purchase",
+        "order",
+    },
+    "order_update_cancel": {
+        "cancel",
+        "cancellation",
+        "update",
+        "modify",
+        "address",
+        "delivery",
+        "shipment",
+        "shipping",
+        "order",
+    },
+    "account_payment": {
+        "account",
+        "payment",
+        "card",
+        "credit",
+        "billing",
+        "customer",
+        "user",
+        "profile",
+    },
+    "flight_change_cancel": {
+        "flight",
+        "reservation",
+        "booking",
+        "book",
+        "cancel",
+        "change",
+        "exchange",
+        "ticket",
+        "airline",
+    },
+    "flight_service": {
+        "seat",
+        "baggage",
+        "bag",
+        "luggage",
+        "passenger",
+        "airport",
+        "meal",
+        "upgrade",
+        "check",
+    },
+}
 
 
 def _json(text: str) -> dict[str, Any]:
@@ -163,6 +243,117 @@ def _tool_call_arguments(tool_call: Any) -> Any:
 def _is_write_tool_call(tool_call: Any) -> bool:
     name = _tool_call_name(tool_call)
     return bool(name) and name.startswith(WRITE_TOOL_PREFIXES)
+
+
+def _tau2_terms(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_]{2,}", text.lower())
+        if token not in TAU2_TYPED_STOPWORDS
+    }
+
+
+def _tau2_tool_names(text: str) -> set[str]:
+    names = set(re.findall(r"(?:name|unknown_tool):\s*([a-zA-Z_][a-zA-Z0-9_]*)", text))
+    names.update(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", text))
+    return {name for name in names if len(name) > 2}
+
+
+def _tau2_operation_families(text: str) -> set[str]:
+    terms = _tau2_terms(text)
+    families = set()
+    for family, keywords in TAU2_OPERATION_KEYWORDS.items():
+        if terms & keywords:
+            families.add(family)
+    return families
+
+
+def _tau2_typed_metadata(query: str, text: str, base_score: float, search_rank: int) -> dict[str, Any]:
+    query_terms = _tau2_terms(query)
+    text_terms = _tau2_terms(text)
+    matched_terms = sorted((query_terms & text_terms) - TAU2_TYPED_STOPWORDS)
+    query_tools = _tau2_tool_names(query)
+    memory_tools = _tau2_tool_names(text)
+    matched_tools = sorted(query_tools & memory_tools)
+    query_families = _tau2_operation_families(query)
+    memory_families = _tau2_operation_families(text)
+    matched_families = sorted(query_families & memory_families)
+    has_success_signal = bool(
+        re.search(r"\b(reward|db_match|success|completed|score)\b", text.lower())
+    )
+    confidence = min(
+        1.0,
+        0.18
+        + 0.08 * len(matched_terms[:5])
+        + 0.18 * len(matched_tools[:2])
+        + 0.16 * len(matched_families[:2])
+        + (0.10 if has_success_signal else 0.0),
+    )
+    uncertainty = max(0.0, 1.0 - confidence)
+    typed_score = (
+        base_score
+        + 0.06 * len(matched_terms[:6])
+        + 0.18 * len(matched_tools[:2])
+        + 0.16 * len(matched_families[:2])
+        + (0.05 if has_success_signal else 0.0)
+        - 0.01 * max(search_rank - 1, 0)
+    )
+    return {
+        "selection_mode": "typed",
+        "operation_families": sorted(memory_families),
+        "matched_operation_families": matched_families,
+        "tool_actions": sorted(memory_tools)[:12],
+        "matched_tool_actions": matched_tools,
+        "matched_terms": matched_terms[:12],
+        "typed_confidence": round(confidence, 4),
+        "typed_uncertainty": round(uncertainty, 4),
+        "typed_score": round(typed_score, 6),
+        "has_success_signal": has_success_signal,
+    }
+
+
+def _tau2_select_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    mode: str,
+) -> list[dict[str, Any]]:
+    if mode == "score":
+        return candidates
+    selected: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    seen_tools: set[str] = set()
+    remaining = sorted(
+        candidates,
+        key=lambda row: (
+            row.get("typed_score", row.get("score") or 0.0),
+            -int(row.get("search_rank") or 0),
+        ),
+        reverse=True,
+    )
+    while remaining:
+        best_index = 0
+        best_value = float("-inf")
+        for index, row in enumerate(remaining):
+            families = set(row.get("operation_families") or [])
+            tools = set(row.get("tool_actions") or [])
+            novelty = 0.04 * len(families - seen_families) + 0.03 * len(tools - seen_tools)
+            redundancy = 0.04 * len(families & seen_families) + 0.02 * len(tools & seen_tools)
+            length_penalty = min(float(row.get("text_chars") or 0) / 20000.0, 0.12)
+            value = (
+                float(row.get("typed_score") or row.get("score") or 0.0)
+                + novelty
+                - redundancy
+                - length_penalty
+            )
+            if value > best_value:
+                best_value = value
+                best_index = index
+        row = remaining.pop(best_index)
+        row["typed_selection_value"] = round(best_value, 6)
+        selected.append(row)
+        seen_families.update(row.get("operation_families") or [])
+        seen_tools.update(row.get("tool_actions") or [])
+    return selected
 
 
 def _tool_call_query(tool_calls: list[Any], state_messages: list[Any]) -> str:
@@ -699,18 +890,62 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
             try:
                 result = client.search(query=query, target_uri=args.search_uri, limit=search_limit)
                 memories = _memory_matches(result)
-                blocks = []
-                injected_chars_used = 0
+                candidates: list[dict[str, Any]] = []
                 for index, match in enumerate(memories[:search_limit], 1):
                     uri = _match_value(match, "uri", "")
                     text, read_error = _read_memory_text(client, match)
+                    try:
+                        base_score = float(_match_value(match, "score", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        base_score = 0.0
+                    row = {
+                        "uri": uri,
+                        "score": _match_value(match, "score", None),
+                        "level": _match_value(match, "level", None),
+                        "search_rank": index,
+                        "text": text,
+                        "text_chars": len(text),
+                        "selection_mode": args.memory_selection_mode,
+                    }
+                    if read_error:
+                        row["read_error"] = read_error
+                    if args.memory_selection_mode == "typed":
+                        row.update(_tau2_typed_metadata(query, text, base_score, index))
+                    candidates.append(row)
+
+                selected_candidates = _tau2_select_candidates(
+                    candidates,
+                    mode=args.memory_selection_mode,
+                )
+                blocks = []
+                injected_chars_used = 0
+                selected_uri_order = {
+                    row["uri"]: index for index, row in enumerate(selected_candidates, 1)
+                }
+                for selected_index, row in enumerate(selected_candidates, 1):
+                    uri = row["uri"]
+                    text = row.pop("text")
                     clean_text = text.strip()
-                    block_text = f"Memory {index} ({uri}):\n{clean_text}" if clean_text else ""
+                    metadata = ""
+                    if args.memory_selection_mode == "typed":
+                        metadata = (
+                            "metadata: "
+                            f"operation_families={row.get('operation_families', [])}; "
+                            f"matched_tools={row.get('matched_tool_actions', [])}; "
+                            f"matched_terms={row.get('matched_terms', [])}; "
+                            f"confidence={row.get('typed_confidence')}; "
+                            f"uncertainty={row.get('typed_uncertainty')}\n"
+                        )
+                    block_text = (
+                        f"Memory {selected_index} ({uri}):\n{metadata}{clean_text}"
+                        if clean_text
+                        else ""
+                    )
                     block_chars = len(block_text)
                     budget_used_before = injected_chars_used
                     budget_dropped = False
                     truncated = False
-                    injected = index <= inject_limit and bool(block_text)
+                    injected = selected_index <= inject_limit and bool(block_text)
                     if injected and inject_max_chars is not None:
                         remaining = inject_max_chars - injected_chars_used
                         if remaining <= 0:
@@ -726,23 +961,20 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                                 budget_dropped = True
                     if injected:
                         injected_chars_used += block_chars
-                    row = {
-                        "uri": uri,
-                        "score": getattr(match, "score", None),
-                        "level": getattr(match, "level", None),
-                        "text_chars": len(text),
-                        "block_chars": block_chars,
-                        "injected": injected,
-                        "inject_max_chars": inject_max_chars,
-                        "inject_budget_used_before": budget_used_before,
-                        "inject_budget_used_after": injected_chars_used,
-                        "inject_budget_dropped": budget_dropped,
-                        "inject_budget_truncated": truncated,
-                    }
+                    row.update(
+                        {
+                            "selection_rank": selected_uri_order.get(uri, selected_index),
+                            "block_chars": block_chars,
+                            "injected": injected,
+                            "inject_max_chars": inject_max_chars,
+                            "inject_budget_used_before": budget_used_before,
+                            "inject_budget_used_after": injected_chars_used,
+                            "inject_budget_dropped": budget_dropped,
+                            "inject_budget_truncated": truncated,
+                        }
+                    )
                     if budget_dropped:
                         row["skipped_reason"] = "inject_char_budget_exceeded"
-                    if read_error:
-                        row["read_error"] = read_error
                     rows.append(row)
                     if injected:
                         blocks.append(block_text)
@@ -1007,6 +1239,16 @@ def main() -> int:
         choices=["first_user", "prewrite", "first_user_prewrite"],
         default="first_user",
     )
+    parser.add_argument(
+        "--memory-selection-mode",
+        choices=["score", "typed"],
+        default="score",
+        help=(
+            "How retrieved OpenViking memories are ordered before injection. "
+            "score preserves retrieval score order; typed adds lightweight "
+            "operation/tool/evidence metadata and budget-aware diversity."
+        ),
+    )
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument("--prepare-corpus-only", action="store_true")
     parser.add_argument(
@@ -1161,6 +1403,7 @@ def main() -> int:
         "strategy_id": args.strategy_id,
         "retrieval_mode": args.retrieval_mode,
         "retrieval": {
+            "memory_selection_mode": args.memory_selection_mode,
             "first_user_retrieval_top_k": args.first_user_retrieval_top_k,
             "first_user_inject_top_k": args.first_user_inject_top_k,
             "first_user_memory_inject_max_chars": args.first_user_memory_inject_max_chars,

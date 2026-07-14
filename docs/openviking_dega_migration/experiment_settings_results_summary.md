@@ -85,23 +85,29 @@ tau2-bench：trajectory memory matched/injected 全覆盖，但 reward 改善不
 
 - 数据集：tau2-bench，小规模执行
 - 任务：Agent 经验记忆，复用历史成功 trajectory 辅助当前任务
-- 对比：no-memory vs OpenViking trajectory memory
-- 结果目录：`/home/shuaidong/hw/openviking_experiments/gpt54mini_locomo_tau2/tau2/result/small50_execute`
+- 对比：no-memory vs OpenViking score trajectory memory vs OpenViking typed trajectory selection
+- score trajectory 结果目录：`/home/shuaidong/hw/openviking_experiments/gpt54mini_locomo_tau2/tau2/result/small50_execute`
+- typed trajectory 结果目录：`/home/shuaidong/hw/openviking_experiments/gpt54mini_locomo_tau2/tau2/result/typed_small50_execute`
 
 结果：
 
 | Domain | Method | Simulations | Avg Reward | DB Match |
 | --- | --- | ---: | ---: | ---: |
 | retail | no-memory | 25 | 0.68 | 0.68 |
-| retail | OpenViking trajectory memory | 25 | 0.72 | 0.72 |
+| retail | OpenViking score trajectory memory | 25 | 0.72 | 0.72 |
+| retail | OpenViking typed trajectory selection | 25 | 0.68 | 0.68 |
 | airline | no-memory | 20 | 0.55 | 0.55 |
-| airline | OpenViking trajectory memory | 20 | 0.55 | 0.60 |
+| airline | OpenViking score trajectory memory | 20 | 0.55 | 0.60 |
+| airline | OpenViking typed trajectory selection | 20 | 0.60 | 0.60 |
+| total | no-memory | 45 | 0.6222 | 0.6222 |
+| total | OpenViking score trajectory memory | 45 | 0.6444 | 0.6667 |
+| total | OpenViking typed trajectory selection | 45 | 0.6444 | 0.6444 |
 
 结论：
 
-- retail 上 OpenViking trajectory memory 有正向收益，reward 和 db_match 都从 0.68 到 0.72。
-- airline 上 reward 没变，db_match 从 0.55 到 0.60。
-- trace 显示 memory 可以稳定检索和注入，但 reward 改善不均匀，说明经验记忆需要 task_family、tool_action、success/failure、reliability 等更细粒度结构，而不是只按相似度注入历史轨迹。
+- 原 score trajectory memory 在 retail 上有正向收益，reward 和 db_match 都从 0.68 到 0.72；airline 上 reward 没变，db_match 从 0.55 到 0.60。
+- typed trajectory selection 在 airline 上把 reward 从 0.55 提到 0.60，但 retail 从 0.72 回落到 0.68；45 simulation 加权后，typed 的 avg reward 与 score trajectory 持平，DB match 低于 score trajectory。
+- 这说明“结构化 trajectory selection”方向有信号，但当前轻量规则还不稳定。trace 显示 memory 可以稳定检索和注入，typed metadata 也已写入 prompt；但 reward 改善不均匀，说明经验记忆不能只按 operation_family 和关键词匹配，还需要更可靠的 tool_action、success/failure、reliability、usage_feedback。
 
 ## 4. HotpotQA Evidence Packing 消融
 
