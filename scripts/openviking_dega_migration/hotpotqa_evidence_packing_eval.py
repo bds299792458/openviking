@@ -25,7 +25,10 @@ STOPWORDS = {
     "a", "an", "the", "of", "in", "on", "for", "to", "and", "or", "by", "with",
     "was", "were", "is", "are", "did", "does", "do", "what", "which", "who",
     "where", "when", "how", "that", "this", "these", "those", "as", "from",
+    "same", "name",
 }
+
+YEAR_RE = re.compile(r"\b(1[5-9]\d{2}|20\d{2})\b")
 
 
 def load_llm_key_from_openviking_config() -> str:
@@ -165,6 +168,57 @@ def title_from_uri(uri: str) -> str:
     return re.sub(r"\.md$", "", leaf).replace("_", " ")
 
 
+def title_key(uri: str) -> str:
+    parts = [part for part in uri.split("/") if part]
+    if len(parts) >= 2 and parts[-1].startswith("."):
+        return parts[-2].lower()
+    leaf = parts[-1] if parts else uri
+    return re.sub(r"\.md$", "", leaf).lower()
+
+
+def question_features(question: str) -> dict:
+    q = question.lower()
+    return {
+        "asks_year": "year" in q or "born" in q,
+        "asks_when": q.startswith("when") or " what year" in q or " which year" in q,
+        "asks_yesno": q.split(" ", 1)[0] in {"is", "are", "was", "were", "do", "does", "did", "can", "could", "has", "have", "had"},
+        "asks_compare": any(tok in q for tok in ["same", "more", "less", "older", "younger", "larger", "smaller", "nationality"]),
+        "asks_person": q.startswith("who") or "what person" in q or "which person" in q,
+        "asks_place": q.startswith("where") or "city" in q or "country" in q or "located" in q,
+    }
+
+
+def annotate_typed_evidence(question: str, evidence: list[dict]) -> None:
+    q_tokens = tokens(question)
+    features = question_features(question)
+    max_rank = max((row["rank"] for row in evidence), default=1)
+    for row in evidence:
+        title_tokens = tokens(row["title"])
+        content_head = row["content"][:1600]
+        content_tokens = tokens(content_head)
+        is_abstract = row["uri"].endswith("/.abstract.md")
+        row["title_key"] = title_key(row["uri"])
+        row["is_abstract"] = is_abstract
+        row["bridge_score"] = 0.65 * row["title_overlap"] + 0.25 * row["content_overlap"] + 0.10 * (1.0 - (row["rank"] - 1) / max(1, max_rank))
+        answer_hint = row["content_overlap"]
+        if features["asks_year"] or features["asks_when"]:
+            answer_hint += 0.35 if YEAR_RE.search(content_head) else 0.0
+        if features["asks_yesno"] or features["asks_compare"]:
+            answer_hint += 0.20 * row["title_overlap"] + 0.10 * min(1.0, len(q_tokens & content_tokens) / max(1, len(q_tokens)))
+        if features["asks_person"] or features["asks_place"]:
+            answer_hint += 0.15 if re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", content_head) else 0.0
+        answer_hint -= 0.12 if is_abstract else 0.0
+        row["answer_hint_score"] = max(0.0, answer_hint)
+        if row["bridge_score"] >= row["answer_hint_score"] + 0.05:
+            row["evidence_role"] = "bridge"
+        elif row["answer_hint_score"] >= row["bridge_score"] + 0.05:
+            row["evidence_role"] = "answer_hint"
+        else:
+            row["evidence_role"] = "mixed"
+        row["confidence"] = max(0.0, min(1.0, 0.45 * row["score_norm"] + 0.25 * row["bridge_score"] + 0.30 * row["answer_hint_score"]))
+        row["uncertainty"] = max(0.0, min(1.0, 1.0 - row["confidence"]))
+
+
 def to_evidence(question: str, resources: list[dict]) -> list[dict]:
     q_tokens = tokens(question)
     evidence = []
@@ -256,10 +310,95 @@ def select_evidence_aware(evidence: list[dict], doc_cap: int, char_cap: int | No
     return selected
 
 
-def build_prompt(question: str, contexts: list[str]) -> str:
-    context = "\n\n".join(f"[Context {idx + 1}]\n{text[:4000]}" for idx, text in enumerate(contexts))
+def select_typed_evidence(evidence: list[dict], doc_cap: int, char_cap: int | None) -> list[dict]:
+    for row in evidence:
+        row["selected"] = False
+        row["skipped_reason"] = ""
+    selected: list[dict] = []
+    selected_tokens: list[set[str]] = []
+    selected_titles: set[str] = set()
+    selected_roles: set[str] = set()
+    total_chars = 0
+
+    def candidate_value(item: dict) -> float:
+        item_tokens = tokens(item["title"] + " " + item["content"][:1600])
+        redundancy = max((jaccard(item_tokens, st) for st in selected_tokens), default=0.0)
+        title_dup = 1.0 if item["title_key"] in selected_titles else 0.0
+        role_bonus = 0.12 if item["evidence_role"] not in selected_roles else 0.0
+        abstract_penalty = 0.10 if item["is_abstract"] and item["title_key"] in selected_titles else 0.0
+        relation_value = 0.40 * item["bridge_score"] + 0.40 * item["answer_hint_score"] + 0.20 * item["score_norm"]
+        cost_penalty = 0.04 * min(1.0, item["content_chars"] / 4000.0)
+        conflict_penalty = 0.18 * title_dup + 0.22 * redundancy + abstract_penalty
+        return relation_value + role_bonus - conflict_penalty - cost_penalty
+
+    while evidence and len(selected) < doc_cap:
+        best = None
+        best_value = -999.0
+        for item in evidence:
+            if item["selected"]:
+                continue
+            if char_cap is not None and selected and total_chars + item["content_chars"] > char_cap:
+                continue
+            value = candidate_value(item)
+            if value > best_value:
+                best = item
+                best_value = value
+        if best is None:
+            break
+        best["selected"] = True
+        best["marginal_value"] = best_value
+        selected.append(best)
+        selected_titles.add(best["title_key"])
+        selected_roles.add(best["evidence_role"])
+        selected_tokens.append(tokens(best["title"] + " " + best["content"][:1600]))
+        total_chars += best["content_chars"]
+
+    selected_ids = {id(item) for item in selected}
+    for item in evidence:
+        if id(item) not in selected_ids and not item.get("skipped_reason"):
+            item["skipped_reason"] = "typed_lower_marginal_value"
+    return selected
+
+
+def select_oracle_support(item: dict, evidence: list[dict], doc_cap: int, char_cap: int | None) -> list[dict]:
+    support_titles = {title.lower().replace(" ", "_") for title, _ in item.get("supporting_facts", [])}
+    for row in evidence:
+        row["selected"] = False
+        row["skipped_reason"] = ""
+        row["oracle_support"] = row["title_key"] in support_titles
+    support = [row for row in evidence if row["oracle_support"]]
+    support.sort(key=lambda row: (not row["is_abstract"], row["retrieval_score"]), reverse=True)
+    rest = [row for row in evidence if not row["oracle_support"]]
+    rest.sort(key=lambda row: row["retrieval_score"], reverse=True)
+    selected = []
+    total_chars = 0
+    for row in support + rest:
+        if len(selected) >= doc_cap:
+            row["skipped_reason"] = "doc_cap"
+            continue
+        if char_cap is not None and selected and total_chars + row["content_chars"] > char_cap:
+            row["skipped_reason"] = "char_cap"
+            continue
+        row["selected"] = True
+        selected.append(row)
+        total_chars += row["content_chars"]
+    return selected
+
+
+def build_prompt(question: str, contexts: list[str], selected: list[dict] | None = None) -> str:
+    if selected:
+        chunks = []
+        for idx, (text, row) in enumerate(zip(contexts, selected), start=1):
+            role = row.get("evidence_role", "context")
+            confidence = row.get("confidence")
+            conf_text = f", confidence={confidence:.2f}" if isinstance(confidence, (int, float)) else ""
+            chunks.append(f"[Context {idx}: {role}{conf_text}, title={row.get('title', '')}]\n{text[:4000]}")
+        context = "\n\n".join(chunks)
+    else:
+        context = "\n\n".join(f"[Context {idx + 1}]\n{text[:4000]}" for idx, text in enumerate(contexts))
     return (
         "Answer the HotpotQA question using only the provided contexts.\n"
+        "Use bridge evidence to connect entities and answer_hint evidence to extract the final answer.\n"
         "Return only the short final answer. If the answer is yes or no, return exactly yes or no.\n\n"
         f"{context}\n\nQuestion: {question}\nFinal answer:"
     )
@@ -316,13 +455,18 @@ def evaluate_variant(cases: list[dict], variant: str, limit: int, doc_cap: int, 
         gold = item["answer"]
         resources, retrieval_latency = find_resources(question, limit=limit)
         evidence = to_evidence(question, resources)
-        if variant.startswith("evidence"):
+        annotate_typed_evidence(question, evidence)
+        if variant.startswith("typed"):
+            selected = select_typed_evidence(evidence, doc_cap=doc_cap, char_cap=char_cap)
+        elif variant.startswith("oracle"):
+            selected = select_oracle_support(item, evidence, doc_cap=doc_cap, char_cap=char_cap)
+        elif variant.startswith("evidence"):
             selected = select_evidence_aware(evidence, doc_cap=doc_cap, char_cap=char_cap)
         else:
             selected = select_score_only(evidence, doc_cap=doc_cap, char_cap=char_cap)
         contexts = [row["content"] for row in selected]
         uris = [row["uri"] for row in selected]
-        prompt = build_prompt(question, contexts)
+        prompt = build_prompt(question, contexts, selected if variant.startswith(("typed", "oracle")) else None)
         answer, usage, llm_latency = call_llm(prompt)
         support_recall, all_support_hit = support_metrics(item, uris)
         rows.append(
@@ -357,6 +501,13 @@ def evaluate_variant(cases: list[dict], variant: str, limit: int, doc_cap: int, 
                             "title_overlap",
                             "content_overlap",
                             "evidence_score",
+                            "title_key",
+                            "is_abstract",
+                            "bridge_score",
+                            "answer_hint_score",
+                            "evidence_role",
+                            "confidence",
+                            "uncertainty",
                             "selected",
                             "skipped_reason",
                         )
@@ -387,7 +538,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=int, default=50)
     parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--variants", default="score_top5,score_top20_cap,evidence_top20_cap")
+    parser.add_argument("--variants", default="score_top5,score_top20_cap,evidence_top20_cap,typed_top20_cap")
     args = parser.parse_args()
 
     data = json.loads(DATA.read_text(encoding="utf-8"))[args.offset : args.offset + args.cases]
@@ -396,13 +547,22 @@ def main() -> None:
         "score_top5": dict(limit=5, doc_cap=5, char_cap=None),
         "score_top20_cap": dict(limit=20, doc_cap=8, char_cap=12000),
         "evidence_top20_cap": dict(limit=20, doc_cap=8, char_cap=12000),
+        "typed_top20_cap": dict(limit=20, doc_cap=8, char_cap=12000),
+        "oracle_support_pack": dict(limit=20, doc_cap=8, char_cap=12000),
     }
-    summaries = {}
+    summary_path = OUT / f"summary_{args.cases}case.json"
+    if summary_path.exists():
+        try:
+            summaries = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            summaries = {}
+    else:
+        summaries = {}
     for variant in [v.strip() for v in args.variants.split(",") if v.strip()]:
         result = evaluate_variant(data, variant=variant, **variants[variant])
         (OUT / f"{variant}_{args.cases}case.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         summaries[variant] = result["summary"]
-    (OUT / f"summary_{args.cases}case.json").write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_path.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summaries, ensure_ascii=False, indent=2))
 
 

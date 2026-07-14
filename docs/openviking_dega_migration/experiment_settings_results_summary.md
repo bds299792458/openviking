@@ -79,7 +79,7 @@
 - airline 上 reward 没变，db_match 从 0.55 到 0.60。
 - trace 显示 memory 可以稳定检索和注入，但 reward 改善不均匀，说明经验记忆需要 task_family、tool_action、success/failure、reliability 等更细粒度结构，而不是只按相似度注入历史轨迹。
 
-## 4. HotpotQA 轻量 Evidence Packing 消融
+## 4. HotpotQA Evidence Packing 消融
 
 设置：
 
@@ -89,6 +89,8 @@
   - `score_top5`：检索 top-5，按检索分拼接
   - `score_top20_cap`：检索 top-20，保留 score 最高 8 个文档，字符上限 12000
   - `evidence_top20_cap`：检索 top-20 后构造 EvidenceRecord，用检索分、标题重合、内容重合、冗余惩罚做选择
+  - `typed_top20_cap`：加入标题去重、bridge/answer_hint 角色标注、置信度和预算化选择
+  - `oracle_support_pack`：使用 HotpotQA gold supporting facts 构造上限分析，不作为可部署方法
 - 结果目录：`/home/shuaidong/hw/openviking_experiments/evidence_packing_hotpotqa`
 
 结果：
@@ -98,12 +100,14 @@
 | `score_top5` | 50 | 62.00% | 68.00% | 54.00% | 65.55% | 62.00% | 44.00% | 5.0 | 2320.86 | 5020.02 | 3.64s |
 | `score_top20_cap` | 50 | 66.00% | 78.00% | 58.00% | 73.36% | 72.00% | 54.00% | 8.0 | 4268.24 | 5505.88 | 3.72s |
 | `evidence_top20_cap` | 50 | 64.00% | 74.00% | 56.00% | 70.73% | 71.00% | 56.00% | 8.0 | 4372.56 | 5568.70 | 5.44s |
+| `typed_top20_cap` | 50 | 74.00% | 80.00% | 66.00% | 77.69% | 75.00% | 58.00% | 8.0 | 4797.02 | 5746.94 | 7.67s |
+| `oracle_support_pack` | 50 | 70.00% | 80.00% | 62.00% | 75.54% | 78.00% | 62.00% | 8.0 | 4420.98 | 5614.68 | 7.28s |
 
 结论：
 
 - `score_top20_cap` 相比 `score_top5` 有提升，但不是等比例提升。
 - 第一版 `evidence_top20_cap` 没有超过 `score_top20_cap`，说明只靠词面重合和冗余惩罚不够。
-- 这个负结果很关键：DEGA-style 思路不能只迁移成一个 reranker，而要迁移成 typed evidence、证据关系、任务假设、冲突检测和 usage feedback。
+- `typed_top20_cap` 提升到 74% strict accuracy，说明更有效的方向是结构化证据角色和上下文组织，而不是盲目扩大 top-k。
 
 ## 5. 当前总判断
 
@@ -112,12 +116,6 @@
 - top-k 变大能提升覆盖率，但不保证端到端正确率等比例提升。
 - memory 被召回和注入只是必要条件，不代表模型会正确使用。
 - 朴素 evidence packing 没有超过 score-only top20 cap，说明下一步应加入更强的结构化证据状态。
+- typed evidence 的小规模提升说明 DEGA-style 思路更适合作为“证据状态建模和预算化上下文选择”迁移，而不是简单 reranker。
 
-因此当前不建议继续把 HotpotQA 扩到 100/150。更合理的下一轮实验是维持 50 case，做机制更明确的消融：
-
-1. `score_top20_cap`：当前强基线。
-2. `typed_evidence_top20_cap`：加入 bridge/answer-bearing、memory_type、event_time、task_family。
-3. `typed_evidence_with_feedback`：加入 usage feedback 和 source reliability。
-4. `oracle_support_pack`：HotpotQA 中用 gold supporting facts 构造上限，判断瓶颈在检索打包还是 LLM 推理。
-
-只有当 50 case 趋势接近或不稳定时，再扩大到 100/150 做稳健性确认。
+因此当前不建议继续把 HotpotQA 扩到 100/150。更合理的下一轮实验是维持 50 case，继续做机制更明确的 LoCoMo/tau2 typed memory 消融。
