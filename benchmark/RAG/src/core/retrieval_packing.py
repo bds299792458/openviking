@@ -7,6 +7,21 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 _TOKEN_RE = re.compile(r"\w+")
 _LEVEL_SUFFIXES = ("/.abstract.md", "/.overview.md")
+_TEMPORAL_RE = re.compile(
+    r"\b(when|what date|what day|what month|what year|how long|before|after|"
+    r"earlier|later|first|last|recent|recently|ago|then|timeline|date|year)\b",
+    re.IGNORECASE,
+)
+_INTERPRETIVE_RE = re.compile(
+    r"\b(why|meaning|significance|significant|symboli[sz]|imply|implied|"
+    r"overall|summari[sz]|describe|theme|purpose)\b",
+    re.IGNORECASE,
+)
+_MULTI_HOP_RE = re.compile(
+    r"\b(between|relationship|related|connection|connect|both|each|"
+    r"which .* and .*|who .* (work|know|meet)|how did .* lead|what .* after)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_uri(uri: str) -> str:
@@ -70,6 +85,20 @@ class RetrievalCandidate:
     def token_set(self) -> Set[str]:
         return _token_set(self.prompt_text)
 
+    @property
+    def result(self) -> Dict[str, Any]:
+        return dict(self.metadata.get("result", {}))
+
+    @property
+    def has_date_signal(self) -> bool:
+        text = f"{self.prompt_text} {self.abstract}"
+        return bool(re.search(r"\b(?:19|20)\d{2}\b|\b\d{1,2}[/-]\d{1,2}\b", text))
+
+    @property
+    def has_relation_signal(self) -> bool:
+        result = self.result
+        return bool(result.get("relations"))
+
 
 class RetrievalPacker:
     def __init__(self, token_counter=None):
@@ -105,6 +134,8 @@ class RetrievalPacker:
         *,
         topk: int,
         strategy: str = "score_only",
+        query: str = "",
+        question_category: Optional[str] = None,
         token_budget: Optional[int] = None,
         diversity_lambda: float = 0.35,
         source_penalty: float = 0.12,
@@ -131,7 +162,135 @@ class RetrievalPacker:
                 token_budget=token_budget,
                 summary_limit=summary_limit,
             )
+        if strategy == "query_aware":
+            return self._query_aware(
+                ordered,
+                query=query,
+                question_category=question_category,
+                topk=topk,
+                token_budget=token_budget,
+                summary_limit=summary_limit,
+            )
         raise ValueError(f"Unsupported retrieval packing strategy: {strategy}")
+
+    @staticmethod
+    def classify_query(query: str, question_category: Optional[str] = None) -> str:
+        """Classify evidence needs without another model call.
+
+        LoCoMo categories are useful supervision when available, while the
+        lexical fallback keeps the policy usable for other benchmark adapters.
+        The labels describe selection needs, not answer semantics.
+        """
+        text = str(query or "")
+        category = str(question_category or "")
+        if _TEMPORAL_RE.search(text) or category == "2":
+            return "temporal"
+        if _MULTI_HOP_RE.search(text) or category == "3":
+            return "multi_hop"
+        if _INTERPRETIVE_RE.search(text) or category == "4":
+            return "interpretive"
+        return "factual"
+
+    def _query_aware(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        query: str,
+        question_category: Optional[str],
+        topk: int,
+        token_budget: Optional[int],
+        summary_limit: int,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        """Select evidence according to the question's evidence shape.
+
+        Vector score remains the primary signal. Lexical coverage is a small
+        tie-breaker for exact names/dates, while query type controls whether
+        leaf detail, source diversity, or one navigation summary is useful.
+        This makes the policy auditable and avoids spending an LLM call merely
+        to classify a benchmark question.
+        """
+        query_type = self.classify_query(query, question_category)
+        query_tokens = _token_set(query)
+        leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        summaries = [candidate for candidate in ordered if candidate.level < 2]
+
+        if query_type == "interpretive":
+            summary_slots = min(1, max(0, summary_limit if summary_limit > 0 else 1))
+        else:
+            summary_slots = min(0, max(0, summary_limit))
+
+        def lexical_coverage(candidate: RetrievalCandidate) -> float:
+            if not query_tokens:
+                return 0.0
+            return len(query_tokens & candidate.token_set) / len(query_tokens)
+
+        def base_utility(candidate: RetrievalCandidate) -> float:
+            utility = candidate.score + 0.08 * lexical_coverage(candidate)
+            if query_type == "temporal":
+                utility += 0.06 * int(candidate.has_date_signal)
+            elif query_type == "interpretive":
+                utility += 0.04 * int(candidate.level < 2)
+            elif query_type == "multi_hop":
+                utility += 0.03 * int(candidate.has_relation_signal)
+            return utility
+
+        ranked_leaves = sorted(leaves, key=base_utility, reverse=True)
+        ranked_summaries = sorted(summaries, key=base_utility, reverse=True)
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        seen_sources: Set[str] = set()
+        used_tokens = 0
+        budget = token_budget if token_budget and token_budget > 0 else None
+        dropped = {"duplicate_uri": 0, "token_budget": 0, "summary_reserve": 0}
+
+        def choose(pool: Sequence[RetrievalCandidate], allow_diversity: bool) -> None:
+            nonlocal used_tokens
+            remaining = list(pool)
+            while remaining and len(selected) < topk:
+                best_index = None
+                best_value = None
+                for index, candidate in enumerate(remaining):
+                    if candidate.base_uri in seen_uris:
+                        dropped["duplicate_uri"] += 1
+                        continue
+                    next_tokens = used_tokens + candidate.prompt_tokens
+                    if budget is not None and selected and next_tokens > budget:
+                        continue
+                    value = base_utility(candidate)
+                    if allow_diversity and candidate.source not in seen_sources:
+                        value += 0.05
+                    if best_value is None or value > best_value:
+                        best_index = index
+                        best_value = value
+                if best_index is None:
+                    dropped["token_budget"] += len(remaining)
+                    break
+                candidate = remaining.pop(best_index)
+                selected.append(candidate)
+                seen_uris.add(candidate.base_uri)
+                seen_sources.add(candidate.source)
+                used_tokens += candidate.prompt_tokens
+
+        if summary_slots:
+            choose(ranked_summaries[:summary_slots], allow_diversity=False)
+        # Multi-hop questions benefit from independent sources; other types
+        # primarily need the strongest exact leaf evidence.
+        choose(ranked_leaves, allow_diversity=query_type == "multi_hop")
+        if len(selected) < topk:
+            dropped["summary_reserve"] = len(ranked_summaries)
+            choose(ranked_summaries, allow_diversity=False)
+
+        stats = self._stats("query_aware", ordered, selected, budget, dropped=dropped)
+        stats.update(
+            {
+                "query_type": query_type,
+                "question_category": str(question_category or ""),
+                "summary_limit": summary_slots,
+                "selected_leaf_count": sum(item.level >= 2 for item in selected),
+                "selected_date_signal_count": sum(item.has_date_signal for item in selected),
+            }
+        )
+        return selected, stats
 
     def _hierarchy_aware(
         self,

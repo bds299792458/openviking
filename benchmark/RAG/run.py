@@ -14,10 +14,13 @@ from src.core.logger import setup_logging
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = SCRIPT_DIR
 
-ov_config_path = os.path.join(SCRIPT_DIR, "ov.conf")
+ov_config_path = os.environ.get(
+    "OPENVIKING_CONFIG_FILE",
+    os.path.join(SCRIPT_DIR, "ov.conf"),
+)
 if os.path.exists(ov_config_path):
     os.environ["OPENVIKING_CONFIG_FILE"] = ov_config_path
-    print(f"[Init] Auto-detected OpenViking config: {ov_config_path}")
+    print(f"[Init] Using OpenViking config: {ov_config_path}")
 
 try:
     from src.pipeline import BenchmarkPipeline 

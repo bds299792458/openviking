@@ -125,3 +125,51 @@ def test_hierarchy_aware_uses_summary_as_fallback_for_sparse_leaves():
 
     assert [item.level for item in selected] == [2, 0]
     assert stats['selected_leaf_count'] == 1
+
+
+def test_query_aware_temporal_prefers_leaf_with_date_signal():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        _candidate('viking://resources/doc/session-1.md', 0.95, 'The trip happened during spring.'),
+        _candidate('viking://resources/doc/session-2.md', 0.90, 'The trip happened on 2024-05-17.'),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=1,
+        strategy='query_aware',
+        query='When did the trip happen?',
+        question_category='2',
+    )
+
+    assert selected[0].uri.endswith('session-2.md')
+    assert stats['query_type'] == 'temporal'
+    assert stats['selected_date_signal_count'] == 1
+
+
+def test_query_aware_interpretive_allows_one_summary_then_keeps_leaves():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        RetrievalCandidate(
+            uri='viking://resources/doc/.overview.md',
+            score=0.99,
+            level=1,
+            content='Overview explains the meaning of the event.',
+            prompt_tokens=7,
+        ),
+        _candidate('viking://resources/doc/session-1.md', 0.94, 'Exact event details.'),
+        _candidate('viking://resources/doc/session-2.md', 0.90, 'Second event detail.'),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=2,
+        strategy='query_aware',
+        query='What is the meaning of the event?',
+        question_category='4',
+        summary_limit=1,
+    )
+
+    assert selected[0].level == 1
+    assert selected[1].level == 2
+    assert stats['query_type'] == 'interpretive'

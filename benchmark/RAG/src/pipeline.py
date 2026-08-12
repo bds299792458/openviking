@@ -56,6 +56,7 @@ class BenchmarkPipeline:
                 'max_context_chars_per_block': execution_cfg.get('max_context_chars_per_block', 8000),
                 'diversity_lambda': execution_cfg.get('diversity_lambda', 0.35),
                 'source_penalty': execution_cfg.get('source_penalty', 0.12),
+                'query_aware_summary_limit': execution_cfg.get('query_aware_summary_limit', 1),
             }
         })
         doc_dir = self.config['paths'].get('doc_output_dir')
@@ -283,10 +284,13 @@ class BenchmarkPipeline:
                 prepared,
                 topk=retrieval_topk,
                 strategy=strategy,
+                query=qa.question,
+                question_category=qa.category,
                 token_budget=context_token_budget,
                 diversity_lambda=diversity_lambda,
                 source_penalty=source_penalty,
-                summary_limit=summary_limit,
+                summary_limit=execution_cfg.get('query_aware_summary_limit', 1)
+                if strategy == 'query_aware' else summary_limit,
             )
 
             for candidate in selected_candidates:
