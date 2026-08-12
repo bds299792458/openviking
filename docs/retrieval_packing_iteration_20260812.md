@@ -158,3 +158,154 @@ the preferred route for the next experiment. The earlier 502 result was a
 transient availability failure and should not be used to describe the current
 state. The working `jizhiapi.site` `gpt-5.4-mini` service remains the explicit
 fallback if a subsequent probe fails.
+
+## Retrieval Packing Iteration 3
+
+The next change was `query_aware`, committed as:
+
+```text
+8e7d1035 perf(rag): add query-aware evidence packing
+```
+
+The goal is to move beyond a fixed global rule such as "always prefer leaves"
+or "always reserve one summary slot". Instead, the selector infers the kind of
+evidence the question needs and then applies a conservative deterministic
+policy:
+
+- temporal questions prefer L2 leaves with explicit date signals
+- interpretive questions may keep one L0/L1 summary if it helps preserve the
+  high-level framing, but do not let summaries consume most of the budget
+- multi-hop questions add a small bonus for source diversity and relation
+  coverage
+- factual questions remain close to score order, with only a small lexical
+  coverage tie-breaker
+
+This design keeps the benchmark side transparent: it does not add another LLM
+call just to classify the query, and every decision remains inspectable from
+the recorded packing statistics.
+
+## FastAIToken benchmark stability
+
+The FastAIToken `gpt-5.5` route remained unstable in the benchmark setting on
+2026-08-12 even after successful single-call probes. Two different failure
+patterns were observed:
+
+- the 81-question `score_only` run with `max_workers=4` failed immediately with
+  repeated Cloudflare/origin HTTP 502 errors during answer generation
+- a single-worker 10-question smoke run completed ingestion, but the first
+  generation request stalled for more than ten minutes and made no progress
+
+Because the instability was at the answer-model API layer rather than in the
+packing logic, the final comparable experiment switched to the already verified
+`gpt-5.4-mini` fallback route on `jizhiapi.site`. This keeps the retrieval and
+packing comparison valid while avoiding wasted API calls.
+
+## Fallback runner and retrieval retry
+
+Two infrastructure changes were added to make the comparison reproducible:
+
+```text
+68915a6a test(rag): add isolated fallback benchmark runner
+b080edd5 fix(rag): retry transient retrieval failures
+```
+
+The runner clears `viking://resources` before each run, uses the dedicated
+`gpt-5.4-mini` OpenViking workspace, and avoids carrying over stale indices
+between variants.
+
+The retrieval retry fix addresses a concrete issue seen during the first full
+`query_aware` run: one retrieval request failed because the upstream embedding
+service timed out once, even though the remaining 80 queries completed. The
+wrapper now retries only clearly transient retrieval failures such as gateway
+errors and timeouts, while still surfacing non-retryable `400`-class
+configuration or request errors immediately.
+
+## LoCoMo 10-case smoke on `gpt-5.4-mini`
+
+Before the full 81-question run, both strategies were checked on the first 10
+questions under the same `gpt-5.4-mini` route.
+
+| Strategy | Recall | F1 | Judge accuracy | Avg retrieval time | Avg input tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `score_only` | 0.7083 | 0.2443 | 0.5000 | 0.263s | 3609.4 |
+| `query_aware` | 0.9250 | 0.3758 | 0.7000 | 0.204s | 4397.5 |
+
+This smoke run was useful for two reasons. First, it showed that the new
+policy could materially improve answer quality, not just recall. Second, it
+made the failure mode concrete: several `score_only` misses had nonzero recall,
+but the selected context still biased the model toward `Not mentioned`, which
+is exactly the "retrieved evidence is not the same as correctly used evidence"
+problem.
+
+## LoCoMo 10% full comparison on `gpt-5.4-mini`
+
+The final comparable experiment used the same deterministic 10% LoCoMo split
+with 81 questions, the same `xop3qwen8bembedding` embedding model, the same
+single-worker generation setup, and a clean resource namespace before each run.
+
+| Strategy | Candidate pool | Recall | F1 | Judge accuracy | Avg retrieval time | Avg input tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `score_only` | 5 | 0.7440 | 0.2324 | 0.6420 | 0.198s | 4826.3 |
+| `query_aware` | 20 | 0.8603 | 0.2846 | 0.7407 | 0.290s | 4518.3 |
+
+Relative to the baseline:
+
+- Recall improves by `+0.1163` absolute, about `+15.6%` relative
+- F1 improves by `+0.0522` absolute, about `+22.5%` relative
+- Judge accuracy improves by `+0.0988` absolute, about `+15.4%` relative
+- Average input tokens decrease by about `6.4%`
+- Average retrieval time increases by about `46.8%`
+
+This is the first variant in this series that clears the "overall performance
+improves by at least 5%" threshold on the main answer-quality metrics rather
+than on only one secondary metric.
+
+The latency tradeoff is real. `query_aware` over-fetches 20 candidates and,
+in the final successful run, also had retrieval retry enabled. Therefore the
+quality gain is accompanied by higher retrieval cost. The improvement is not a
+free lunch; it comes from spending more retrieval budget in a more targeted
+way.
+
+## Paired analysis
+
+The paired 81-question comparison was saved as:
+
+```text
+/home/shuaidong/hw/original_upstream_results/rag_10pct/runs/locomo_gpt54mini_query_aware_vs_score_only_analysis.json
+```
+
+The main paired findings are:
+
+- 13 questions improved in Judge outcome
+- 5 questions regressed in Judge outcome
+- 63 questions were unchanged
+- 12 questions improved in retrieval recall
+- 1 question regressed in retrieval recall
+- 33 questions improved in F1
+- 23 questions regressed in F1
+
+By LoCoMo category:
+
+| Category | Meaning | N | `score_only` acc | `query_aware` acc | `score_only` recall | `query_aware` recall | `score_only` F1 | `query_aware` F1 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `1` | factual | 11 | 0.5455 | 0.6364 | 0.3879 | 0.6076 | 0.1752 | 0.1740 |
+| `2` | temporal | 26 | 0.4615 | 0.5385 | 0.7692 | 0.9615 | 0.3180 | 0.4084 |
+| `4` | interpretive | 44 | 0.7727 | 0.8864 | 0.8182 | 0.8636 | 0.1961 | 0.2391 |
+
+The strongest gains come from temporal and interpretive questions. This is
+consistent with the intended mechanism:
+
+- temporal questions benefit when exact-date leaves are protected from being
+  displaced by broad summaries
+- interpretive questions benefit when one summary can preserve discourse-level
+  framing while most of the context budget is still spent on detailed leaves
+
+The factual category is a useful caution. Recall improves strongly there, but
+average F1 is almost flat. That means better retrieval coverage does not
+guarantee proportional answer improvement. Some added evidence helps the judge
+accept the answer, while some added evidence also changes phrasing or focus in
+ways that do not increase overlap-based F1.
+
+This is the clearest evidence so far that larger `top-k` or better recall does
+not automatically translate into equal gains at the answer level. The selector
+must reason about evidence type, not just evidence quantity.
