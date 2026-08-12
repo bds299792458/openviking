@@ -20,6 +20,10 @@ execution:
   max_workers: 10
   # Number of concurrent worker threads for document ingestion
   ingest_workers: 10
+  # HTTP client timeout (seconds) used by the benchmark SDK client
+  sdk_timeout_s: 600
+  # Maximum server-side wait time (seconds) for add_resource(wait=true)
+  ingest_wait_timeout_s: 3600
   # Number of documents to retrieve (top-k)
   retrieval_topk: 5
   # Limit the maximum number of queries to process, null means process all queries

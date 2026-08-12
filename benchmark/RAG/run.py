@@ -122,7 +122,11 @@ def main():
             raise e
         
         # 2. Vector Store
-        vector_store = VikingStoreWrapper()
+        execution_cfg = config.get('execution', {})
+        vector_store = VikingStoreWrapper(
+            sdk_timeout_s=execution_cfg.get('sdk_timeout_s'),
+            ingest_wait_timeout_s=execution_cfg.get('ingest_wait_timeout_s'),
+        )
         
         # 3. LLM Client
         api_key = os.environ.get(

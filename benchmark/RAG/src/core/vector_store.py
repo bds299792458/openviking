@@ -12,15 +12,28 @@ from openviking_sdk import SyncHTTPClient
 
 
 class VikingStoreWrapper:
-    def __init__(self):
-        self.client = SyncHTTPClient()
+    def __init__(self, sdk_timeout_s=600, ingest_wait_timeout_s=3600):
+        if sdk_timeout_s is None:
+            sdk_timeout_s = 600
+        if ingest_wait_timeout_s is None:
+            ingest_wait_timeout_s = 3600
+        self.client = SyncHTTPClient(timeout=sdk_timeout_s)
         self.client.initialize()
+        self.ingest_wait_timeout_s = ingest_wait_timeout_s
 
         try:
             self.enc = tiktoken.get_encoding("cl100k_base")
         except Exception as e:
             print(f"[Warning] tiktoken init failed: {e}")
             self.enc = None
+
+    def _ingest_resource(self, path: str) -> dict:
+        return self.client.add_resource(
+            path,
+            wait=True,
+            timeout=self.ingest_wait_timeout_s,
+            telemetry=True,
+        )
 
     def count_tokens(self, text: str) -> int:
         if not text or not self.enc:
@@ -50,7 +63,7 @@ class VikingStoreWrapper:
                     common_ancestor = None
             
             if common_ancestor:
-                result = self.client.add_resource(common_ancestor, wait=True, telemetry=True)
+                result = self._ingest_resource(common_ancestor)
                 telemetry = result.get("telemetry", {})
                 summary = telemetry.get("summary", {})
                 tokens = summary.get("tokens", {})
@@ -61,7 +74,7 @@ class VikingStoreWrapper:
                 total_embedding_tokens = embedding_tokens.get("total", 0)
             else:
                 for sample in samples:
-                    result = self.client.add_resource(sample.doc_path, wait=True, telemetry=True)
+                    result = self._ingest_resource(sample.doc_path)
                     telemetry = result.get("telemetry", {})
                     summary = telemetry.get("summary", {})
                     tokens = summary.get("tokens", {})
@@ -72,7 +85,7 @@ class VikingStoreWrapper:
                     total_embedding_tokens += embedding_tokens.get("total", 0)
         else:
             for sample in samples:
-                result = self.client.add_resource(sample.doc_path, wait=True, telemetry=True)
+                result = self._ingest_resource(sample.doc_path)
                 telemetry = result.get("telemetry", {})
                 summary = telemetry.get("summary", {})
                 tokens = summary.get("tokens", {})
