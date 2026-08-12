@@ -82,13 +82,13 @@ selected URI set for every query, but LoCoMo here is a single conversation
 resource with many overlapping session chunks. The diversity penalty can
 replace a precise date or event-bearing chunk with a broader overview or a
 less relevant independent source. Therefore, larger candidate pools and
-broader source coverage are not evidence that the model received bette
+broader source coverage are not evidence that the model received better
 supporting evidence.
 
 The observed average retrieval-time difference (0.515s versus 0.228s) is not
 claimed as a packing speedup. The optimized condition ran after the baseline
 against a warm service and reused index, so cache and service warm-up are
-confounders. A latency claim requires alternating or randomized query-orde
+confounders. A latency claim requires alternating or randomized query-order
 trials against the same warmed index.
 
 ## Next experiment
