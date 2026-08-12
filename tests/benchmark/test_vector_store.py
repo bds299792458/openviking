@@ -28,6 +28,32 @@ def _wrapper(client, retries=2):
     return wrapper
 
 
+def test_wrapper_uses_explicit_server_url(monkeypatch):
+    captured = {}
+
+    class _Client:
+        def __init__(self, *, url=None, timeout=None):
+            captured["url"] = url
+            captured["timeout"] = timeout
+
+        def initialize(self):
+            captured["initialized"] = True
+
+    monkeypatch.setattr("core.vector_store.SyncHTTPClient", _Client)
+    wrapper = VikingStoreWrapper(
+        server_url="http://127.0.0.1:1935",
+        sdk_timeout_s=42,
+        retrieve_max_retries=0,
+    )
+
+    assert wrapper.server_url == "http://127.0.0.1:1935"
+    assert captured == {
+        "url": "http://127.0.0.1:1935",
+        "timeout": 42,
+        "initialized": True,
+    }
+
+
 def test_retrieve_retries_transient_gateway_failure():
     client = _FlakyClient([RuntimeError("HTTP 502 bad gateway")])
     result = _wrapper(client).retrieve("test", 5)

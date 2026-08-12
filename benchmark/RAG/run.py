@@ -127,6 +127,7 @@ def main():
         # 2. Vector Store
         execution_cfg = config.get('execution', {})
         vector_store = VikingStoreWrapper(
+            server_url=execution_cfg.get('openviking_url'),
             sdk_timeout_s=execution_cfg.get('sdk_timeout_s'),
             ingest_wait_timeout_s=execution_cfg.get('ingest_wait_timeout_s'),
             retrieve_max_retries=execution_cfg.get('retrieve_max_retries', 2),

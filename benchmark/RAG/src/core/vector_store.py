@@ -14,6 +14,7 @@ from openviking_sdk import SyncHTTPClient
 class VikingStoreWrapper:
     def __init__(
         self,
+        server_url=None,
         sdk_timeout_s=600,
         ingest_wait_timeout_s=3600,
         retrieve_max_retries=2,
@@ -23,7 +24,8 @@ class VikingStoreWrapper:
             sdk_timeout_s = 600
         if ingest_wait_timeout_s is None:
             ingest_wait_timeout_s = 3600
-        self.client = SyncHTTPClient(timeout=sdk_timeout_s)
+        self.server_url = server_url or os.environ.get("OPENVIKING_URL")
+        self.client = SyncHTTPClient(url=self.server_url, timeout=sdk_timeout_s)
         self.client.initialize()
         self.ingest_wait_timeout_s = ingest_wait_timeout_s
         self.retrieve_max_retries = max(0, int(retrieve_max_retries or 0))
