@@ -12,6 +12,7 @@ sys.path.append(str(Path(__file__).parent))
 
 from adapters.base import BaseAdapter
 from core.logger import get_logger
+from core.retrieval_packing import RetrievalPacker
 from core.vector_store import VikingStoreWrapper
 from core.monitor import BenchmarkMonitor
 from core.metrics import MetricsCalculator
@@ -26,6 +27,7 @@ class BenchmarkPipeline:
         self.llm = llm
         self.logger = get_logger()
         self.monitor = BenchmarkMonitor()
+        self.retrieval_packer = RetrievalPacker(token_counter=self.db.count_tokens)
         
         self.output_dir = self.config['paths']['output_dir']
         if not os.path.exists(self.output_dir):
@@ -43,6 +45,19 @@ class BenchmarkPipeline:
         """Step 1: Data Preparation"""
         self.logger.info(">>> Stage: Ingestion & Generation")
         skip_ingestion = self.config['execution'].get('skip_ingestion', False)
+        execution_cfg = self.config.get('execution', {})
+        retrieval_topk = execution_cfg.get('retrieval_topk', 5)
+        self._update_report({
+            'Retrieval Packing Configuration': {
+                'strategy': execution_cfg.get('retrieval_strategy', 'score_only'),
+                'candidate_pool_topk': execution_cfg.get('candidate_pool_topk', retrieval_topk),
+                'retrieval_topk': retrieval_topk,
+                'context_token_budget': execution_cfg.get('context_token_budget'),
+                'max_context_chars_per_block': execution_cfg.get('max_context_chars_per_block', 8000),
+                'diversity_lambda': execution_cfg.get('diversity_lambda', 0.35),
+                'source_penalty': execution_cfg.get('source_penalty', 0.12),
+            }
+        })
         doc_dir = self.config['paths'].get('doc_output_dir')
         if not doc_dir:
             doc_dir = os.path.join(self.output_dir, "docs")
@@ -231,24 +246,51 @@ class BenchmarkPipeline:
             else:
                 enhanced_query = qa.question
                 self.logger.debug(f"[Query-{task['id']}] No retrieval instruction, using raw query")
-            search_res = self.db.retrieve(query=enhanced_query, topk=self.config['execution']['retrieval_topk'])
+            execution_cfg = self.config.get('execution', {})
+            retrieval_topk = execution_cfg['retrieval_topk']
+            strategy = execution_cfg.get('retrieval_strategy', 'score_only')
+            candidate_pool_topk = max(execution_cfg.get('candidate_pool_topk', retrieval_topk), retrieval_topk)
+            context_token_budget = execution_cfg.get('context_token_budget')
+            max_chars_per_block = execution_cfg.get('max_context_chars_per_block', 8000)
+            diversity_lambda = execution_cfg.get('diversity_lambda', 0.35)
+            source_penalty = execution_cfg.get('source_penalty', 0.12)
+
+            search_res = self.db.retrieve(query=enhanced_query, topk=candidate_pool_topk)
             latency = time.time() - t0
             
+            raw_results = list(search_res.get("resources", []))
             retrieved_texts = []
             retrieved_uris = []
             context_blocks = []
+            raw_contents = []
             
-            for result in search_res.get("resources", []):
+            for result in raw_results:
                 uri = result["uri"]
-                retrieved_uris.append(uri)
                 content = (
                     self.db.read_resource(uri)
                     if result.get("level", 2) == 2
                     else f"{result.get('abstract', '')}\n{result.get('overview', '')}"
                 )
-                retrieved_texts.append(content)
-                clean = content[:8000]
-                context_blocks.append(clean)
+                raw_contents.append(content)
+
+            prepared = self.retrieval_packer.prepare_candidates(
+                raw_results,
+                raw_contents,
+                max_chars_per_block=max_chars_per_block,
+            )
+            selected_candidates, packing_stats = self.retrieval_packer.select(
+                prepared,
+                topk=retrieval_topk,
+                strategy=strategy,
+                token_budget=context_token_budget,
+                diversity_lambda=diversity_lambda,
+                source_penalty=source_penalty,
+            )
+
+            for candidate in selected_candidates:
+                retrieved_uris.append(candidate.uri)
+                retrieved_texts.append(candidate.content)
+                context_blocks.append(candidate.prompt_text)
             
             recall = MetricsCalculator.check_recall(retrieved_texts, qa.evidence)
             
@@ -267,7 +309,12 @@ class BenchmarkPipeline:
             return {
                 "_global_index": task['id'], "sample_id": task['sample_id'], "question": qa.question,
                 "gold_answers": qa.gold_answers, "category": str(qa.category), "evidence": qa.evidence,
-                "retrieval": {"latency_sec": latency, "uris": retrieved_uris},
+                "retrieval": {
+                    "latency_sec": latency,
+                    "uris": retrieved_uris,
+                    "candidate_pool_topk": candidate_pool_topk,
+                    "packing": packing_stats,
+                },
                 "llm": {"final_answer": ans},
                 "metrics": {"Recall": recall}, "token_usage": {"total_input_tokens": in_tokens, "llm_output_tokens": out_tokens}
             }
