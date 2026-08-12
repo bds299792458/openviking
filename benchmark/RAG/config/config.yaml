@@ -24,6 +24,8 @@ execution:
   sdk_timeout_s: 600
   # Maximum server-side wait time (seconds) for add_resource(wait=true)
   ingest_wait_timeout_s: 3600
+  # Max L0/L1 summary nodes selected by hierarchy_aware retrieval packing
+  summary_limit: 0
   # Number of documents to retrieve (top-k)
   retrieval_topk: 5
   # Limit the maximum number of queries to process, null means process all queries

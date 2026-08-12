@@ -108,6 +108,7 @@ class RetrievalPacker:
         token_budget: Optional[int] = None,
         diversity_lambda: float = 0.35,
         source_penalty: float = 0.12,
+        summary_limit: int = 0,
     ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
         ordered = sorted(candidates, key=lambda item: item.score, reverse=True)
         if strategy == "score_only":
@@ -123,7 +124,77 @@ class RetrievalPacker:
                 diversity_lambda=diversity_lambda,
                 source_penalty=source_penalty,
             )
+        if strategy == "hierarchy_aware":
+            return self._hierarchy_aware(
+                ordered,
+                topk=topk,
+                token_budget=token_budget,
+                summary_limit=summary_limit,
+            )
         raise ValueError(f"Unsupported retrieval packing strategy: {strategy}")
+
+    def _hierarchy_aware(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        topk: int,
+        token_budget: Optional[int],
+        summary_limit: int,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        """Prefer L2 leaves over L0/L1 navigation summaries.
+
+        OpenViking indexes both raw leaf content (L2) and generated directory
+        sidecars (L0 abstract, L1 overview). For fact-focused RAG evaluation,
+        a broad sidecar can outrank the session containing the exact date or
+        event. Treat summaries as fallback/navigation context instead of peer
+        evidence. A positive ``summary_limit`` explicitly opts into summary
+        slots; otherwise summaries are only used when the candidate pool has
+        too few L2 leaves.
+        """
+        leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        summaries = [candidate for candidate in ordered if candidate.level < 2]
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        used_tokens = 0
+        dropped = {"duplicate_uri": 0, "token_budget": 0, "summary_reserve": 0}
+        budget = token_budget if token_budget and token_budget > 0 else None
+        max_summaries = max(0, summary_limit)
+
+        def add_from(pool: Sequence[RetrievalCandidate], limit: int) -> None:
+            nonlocal used_tokens
+            for candidate in pool:
+                if len(selected) >= limit:
+                    break
+                if candidate.base_uri in seen_uris:
+                    dropped["duplicate_uri"] += 1
+                    continue
+                next_tokens = used_tokens + candidate.prompt_tokens
+                if budget is not None and selected and next_tokens > budget:
+                    dropped["token_budget"] += 1
+                    continue
+                selected.append(candidate)
+                seen_uris.add(candidate.base_uri)
+                used_tokens = next_tokens
+
+        # Reserve the requested summary slots only when explicitly configured.
+        leaf_target = max(0, topk - min(max_summaries, topk))
+        add_from(leaves, leaf_target)
+
+        if max_summaries:
+            add_from(summaries, topk)
+
+        # Fill all remaining slots with leaves first. This also handles sparse
+        # candidate pools where no summary slots were requested.
+        add_from(leaves, topk)
+        if len(selected) < topk:
+            dropped["summary_reserve"] = len(summaries)
+            add_from(summaries, topk)
+
+        stats = self._stats("hierarchy_aware", ordered, selected, budget, dropped=dropped)
+        stats["summary_limit"] = max_summaries
+        stats["selected_levels"] = [item.level for item in selected]
+        stats["selected_leaf_count"] = sum(item.level >= 2 for item in selected)
+        return selected, stats
 
     def _token_cap(
         self,
@@ -238,5 +309,6 @@ class RetrievalPacker:
             "selected_sources": len({item.source for item in selected}),
             "selected_uris": [item.uri for item in selected],
             "selected_scores": [item.score for item in selected],
+            "selected_levels": [item.level for item in selected],
             "dropped": dropped,
         }

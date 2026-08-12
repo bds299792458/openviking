@@ -254,6 +254,7 @@ class BenchmarkPipeline:
             max_chars_per_block = execution_cfg.get('max_context_chars_per_block', 8000)
             diversity_lambda = execution_cfg.get('diversity_lambda', 0.35)
             source_penalty = execution_cfg.get('source_penalty', 0.12)
+            summary_limit = execution_cfg.get('summary_limit', 0)
 
             search_res = self.db.retrieve(query=enhanced_query, topk=candidate_pool_topk)
             latency = time.time() - t0
@@ -285,6 +286,7 @@ class BenchmarkPipeline:
                 token_budget=context_token_budget,
                 diversity_lambda=diversity_lambda,
                 source_penalty=source_penalty,
+                summary_limit=summary_limit,
             )
 
             for candidate in selected_candidates:

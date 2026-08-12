@@ -75,3 +75,53 @@ def test_token_cap_skips_duplicates_and_respects_budget_after_first_pick():
     ]
     assert stats['selected_tokens'] == 7
     assert stats['dropped']['token_budget'] >= 1
+
+
+def test_hierarchy_aware_prefers_l2_leaves_before_summary_nodes():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        RetrievalCandidate(
+            uri='viking://resources/doc/.abstract.md',
+            score=0.99,
+            level=0,
+            content='broad document abstract',
+            prompt_tokens=3,
+        ),
+        RetrievalCandidate(
+            uri='viking://resources/doc/.overview.md',
+            score=0.98,
+            level=1,
+            content='broad document overview',
+            prompt_tokens=3,
+        ),
+        _candidate('viking://resources/doc/session-1.md', 0.94, 'exact event date'),
+        _candidate('viking://resources/doc/session-2.md', 0.90, 'second exact event'),
+    ]
+
+    selected, stats = packer.select(candidates, topk=2, strategy='hierarchy_aware')
+
+    assert [item.uri for item in selected] == [
+        'viking://resources/doc/session-1.md',
+        'viking://resources/doc/session-2.md',
+    ]
+    assert stats['selected_levels'] == [2, 2]
+    assert stats['selected_leaf_count'] == 2
+
+
+def test_hierarchy_aware_uses_summary_as_fallback_for_sparse_leaves():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        RetrievalCandidate(
+            uri='viking://resources/doc/.abstract.md',
+            score=0.99,
+            level=0,
+            content='broad document abstract',
+            prompt_tokens=3,
+        ),
+        _candidate('viking://resources/doc/session-1.md', 0.94, 'exact event date'),
+    ]
+
+    selected, stats = packer.select(candidates, topk=2, strategy='hierarchy_aware')
+
+    assert [item.level for item in selected] == [2, 0]
+    assert stats['selected_leaf_count'] == 1
