@@ -57,6 +57,8 @@ class BenchmarkPipeline:
                 'diversity_lambda': execution_cfg.get('diversity_lambda', 0.35),
                 'source_penalty': execution_cfg.get('source_penalty', 0.12),
                 'query_aware_summary_limit': execution_cfg.get('query_aware_summary_limit', 1),
+                'retrieve_max_retries': execution_cfg.get('retrieve_max_retries', 2),
+                'retrieve_retry_base_delay_s': execution_cfg.get('retrieve_retry_base_delay_s', 1.0),
             }
         })
         doc_dir = self.config['paths'].get('doc_output_dir')

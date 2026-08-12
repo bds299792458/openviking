@@ -129,6 +129,8 @@ def main():
         vector_store = VikingStoreWrapper(
             sdk_timeout_s=execution_cfg.get('sdk_timeout_s'),
             ingest_wait_timeout_s=execution_cfg.get('ingest_wait_timeout_s'),
+            retrieve_max_retries=execution_cfg.get('retrieve_max_retries', 2),
+            retrieve_retry_base_delay_s=execution_cfg.get('retrieve_retry_base_delay_s', 1.0),
         )
         
         # 3. LLM Client

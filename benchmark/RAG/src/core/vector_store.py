@@ -12,7 +12,13 @@ from openviking_sdk import SyncHTTPClient
 
 
 class VikingStoreWrapper:
-    def __init__(self, sdk_timeout_s=600, ingest_wait_timeout_s=3600):
+    def __init__(
+        self,
+        sdk_timeout_s=600,
+        ingest_wait_timeout_s=3600,
+        retrieve_max_retries=2,
+        retrieve_retry_base_delay_s=1.0,
+    ):
         if sdk_timeout_s is None:
             sdk_timeout_s = 600
         if ingest_wait_timeout_s is None:
@@ -20,6 +26,8 @@ class VikingStoreWrapper:
         self.client = SyncHTTPClient(timeout=sdk_timeout_s)
         self.client.initialize()
         self.ingest_wait_timeout_s = ingest_wait_timeout_s
+        self.retrieve_max_retries = max(0, int(retrieve_max_retries or 0))
+        self.retrieve_retry_base_delay_s = max(0.0, float(retrieve_retry_base_delay_s or 0.0))
 
         try:
             self.enc = tiktoken.get_encoding("cl100k_base")
@@ -103,8 +111,40 @@ class VikingStoreWrapper:
         }
 
     def retrieve(self, query: str, topk: int, target_uri: str = "viking://resources"):
-        """Execute retrieval"""
-        return self.client.find(query=query, limit=topk, target_uri=target_uri)
+        """Execute retrieval with bounded retries for transient upstream failures."""
+        for attempt in range(self.retrieve_max_retries + 1):
+            try:
+                return self.client.find(query=query, limit=topk, target_uri=target_uri)
+            except Exception as error:
+                if attempt >= self.retrieve_max_retries or not self._is_retryable_retrieval_error(error):
+                    raise
+                delay = self.retrieve_retry_base_delay_s * (2**attempt)
+                if delay:
+                    time.sleep(delay)
+
+        raise RuntimeError("unreachable")
+
+    @staticmethod
+    def _is_retryable_retrieval_error(error: Exception) -> bool:
+        """Recognize transport and gateway failures without masking bad requests."""
+        message = str(error).lower()
+        retryable_markers = (
+            "context deadline exceeded",
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "temporarily unavailable",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+        return any(marker in message for marker in retryable_markers)
 
     def read_resource(self, uri: str) -> str:
         """Read resource content"""
