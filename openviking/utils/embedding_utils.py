@@ -373,7 +373,8 @@ async def vectorize_directory_meta(
         queue_manager = get_queue_manager()
         embedding_queue = queue_manager.get_queue(queue_manager.EMBEDDING)
 
-        parent_uri = VikingURI(uri).parent.uri
+        parent = VikingURI(uri).parent
+        parent_uri = parent.uri if parent is not None else None
         owner_space = owner_space_for_uri(uri, ctx)
 
         created_at, updated_at = await _resolve_context_timestamps(uri, ctx)

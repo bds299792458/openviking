@@ -1,6 +1,6 @@
 # Query-Aware LoCoMo 10% Summary
 
-Date: 2026-08-12
+Date: 2026-08-13
 
 ## Result口径
 
@@ -9,9 +9,9 @@ This note separates two result sources that must not be numerically mixed:
 1. The official README reports OpenViking results on the full public benchmark
    protocol. These numbers are the public reference baseline for the project.
 2. The local optimization is currently validated on a deterministic 10%
-   LoCoMo split. It is a same-scale controlled comparison against the local
-   `score_only` baseline, not a direct comparison with the official full-scale
-   table.
+   LoCoMo split. The strict baseline is the pre-optimization OpenViking
+   worktree at commit `dcca29364c1a25cb0ad5ba4962f191a8c9027da0`, run on the
+   same 81 questions with the same model and service configuration.
 
 The 10% result is therefore a stage result for validating the optimization
 mechanism. It must not be described as a full-dataset reproduction or as a
@@ -47,10 +47,26 @@ needed to recompute our local `Recall`, `F1`, and normalized judge metrics.
 
 ### Code versions
 
+- strict pre-optimization baseline:
+  `dcca29364c1a25cb0ad5ba4962f191a8c9027da0`
 - `8e7d1035 perf(rag): add query-aware evidence packing`
 - `68915a6a test(rag): add isolated fallback benchmark runner`
 - `b080edd5 fix(rag): retry transient retrieval failures`
 - `38c76a8c fix(rag): bind benchmark runner to configured service`
+- `83341b1a docs(rag): clarify official baseline and 10pct optimization result`
+
+During the strict pre-optimization baseline run, the old benchmark wrapper used
+`add_resource(wait=True)`. Against the current service this accepted the
+resource but left the HTTP request waiting indefinitely. A compatibility-only
+patch was applied in the independent baseline worktree: it submits the resource
+with `wait=False`, then polls `find()` until the uploaded `root_uri` is
+retrievable. This does not change original retrieval, ranking, prompt assembly,
+or evaluation logic.
+
+The current service also exposed a root-directory vectorization bug:
+`vectorize_directory_meta("viking://")` dereferenced a missing parent URI. The
+main worktree now handles root URIs by setting `parent_uri=None` and includes a
+unit test for that case.
 
 ### Evaluation route
 
@@ -83,10 +99,19 @@ The controlled comparison therefore uses the stable fallback route:
 
 | Strategy | Recall | F1 | Normalized judge accuracy | Avg retrieval time | Avg input tokens |
 | --- | ---: | ---: | ---: | ---: | ---: |
+| original pre-optimization `dcca2936` | 0.6298 | 0.2610 | 0.5926 | 0.269s | 3644.1 |
 | `score_only` baseline | 0.7626 | 0.2940 | 0.6914 | 0.220s | 4192.9 |
 | `query_aware` optimized | 0.8726 | 0.3106 | 0.7284 | 0.254s | 4949.2 |
 
-Relative to the baseline:
+Relative to the strict pre-optimization baseline:
+
+- Recall: `+38.55%`
+- F1: `+19.02%`
+- Normalized judge accuracy: `+22.92%`
+- Avg retrieval time: `-5.56%`
+- Avg input tokens: `+35.81%`
+
+Relative to the current-code `score_only` ablation:
 
 - Recall: `+14.43%`
 - F1: `+5.65%`
@@ -95,9 +120,11 @@ Relative to the baseline:
 - Avg input tokens: `+18.04%`
 
 The optimized version therefore clears the requested 5% quality-improvement
-threshold on all three quality metrics in the controlled 10% experiment. It
-does not improve cost metrics in this configuration: the larger candidate pool
-increases retrieval time and the selected context is longer on average.
+threshold against both the strict pre-optimization baseline and the current-code
+`score_only` ablation on this controlled 10% experiment. Its cost profile is
+mixed: retrieval time improves against the old baseline but worsens relative to
+the leaner current-code `score_only`; input tokens increase in both comparisons
+because the optimized packer deliberately supplies richer evidence.
 
 The comparison supporting the 5% claim is this local same-scale table, not the
 official full-dataset README table.
@@ -138,7 +165,11 @@ This is a deliberate tradeoff rather than a free speedup.
 - process log: `docs/retrieval_packing_iteration_20260812.md`
 - paired analysis:
   `/home/shuaidong/hw/original_upstream_results/rag_10pct/runs/locomo_gpt54mini_query_aware_vs_score_only_analysis.json`
-- isolated baseline metrics:
+- strict pre-optimization baseline metrics:
+  `/home/shuaidong/hw/original_upstream_results/rag_10pct/runs/original_pre_optimization_gpt54mini_10pct/locomo/benchmark_metrics_report.json`
+- strict pre-optimization baseline worktree:
+  `/home/shuaidong/hw/OpenViking_original_baseline_20260812`
+- current-code score-only metrics:
   `/home/shuaidong/hw/original_upstream_results/rag_10pct/runs/score_only_gpt54mini_isolated_rerun/locomo/benchmark_metrics_report.json`
 - isolated optimized metrics:
   `/home/shuaidong/hw/original_upstream_results/rag_10pct/runs/query_aware_gpt54mini_isolated_rerun/locomo/benchmark_metrics_report.json`

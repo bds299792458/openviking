@@ -480,6 +480,25 @@ async def test_vectorize_directory_meta_writes_search_tags_into_embedding_contex
 
 
 @pytest.mark.asyncio
+async def test_vectorize_directory_meta_allows_root_uri_without_parent(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("ignored"))
+
+    await embedding_utils.vectorize_directory_meta(
+        uri="viking://",
+        abstract="root abstract",
+        overview="root overview",
+        ctx=DummyReq(),
+    )
+
+    assert len(queue.items) == 2
+    for msg in queue.items:
+        assert msg.context_data["uri"] == "viking://"
+        assert msg.context_data["parent_uri"] is None
+
+
+@pytest.mark.asyncio
 async def test_vectorize_directory_meta_appends_search_tags_by_level(monkeypatch):
     queue = DummyQueue()
     monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
