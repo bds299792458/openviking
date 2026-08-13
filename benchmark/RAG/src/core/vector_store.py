@@ -25,7 +25,13 @@ class VikingStoreWrapper:
         if ingest_wait_timeout_s is None:
             ingest_wait_timeout_s = 3600
         self.server_url = server_url or os.environ.get("OPENVIKING_URL")
-        self.client = SyncHTTPClient(url=self.server_url, timeout=sdk_timeout_s)
+        # The HTTP service cannot read the benchmark process's local path.
+        # Use the SDK temp-upload endpoint for every local file/directory.
+        self.client = SyncHTTPClient(
+            url=self.server_url,
+            timeout=sdk_timeout_s,
+            upload_mode="local",
+        )
         self.client.initialize()
         self.ingest_wait_timeout_s = ingest_wait_timeout_s
         self.retrieve_max_retries = max(0, int(retrieve_max_retries or 0))

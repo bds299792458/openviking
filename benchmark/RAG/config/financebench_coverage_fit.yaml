@@ -14,11 +14,9 @@ llm:
   base_url: https://jizhiapi.site/v1
   api_key_env_var: OPENAI_API_KEY
 execution:
+  retrieval_policy: unified_coverage_fit
   max_workers: 1
   ingest_workers: 1
-  retrieval_topk: 10
-  candidate_pool_topk: 20
-  retrieval_strategy: coverage_fit
   max_queries: null
   skip_ingestion: true
   ingest_mode: per_file
@@ -28,6 +26,3 @@ execution:
   ingest_wait_timeout_s: 3600
   retrieve_max_retries: 3
   retrieve_retry_base_delay_s: 2.0
-  max_context_chars_per_block: 8000
-  context_token_budget: 10000
-  summary_limit: 0

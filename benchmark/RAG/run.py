@@ -8,6 +8,45 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 from src.core.logger import setup_logging
+
+
+# Resolve one retrieval policy before the adapter or pipeline is initialized.
+# Adapters only parse data and format answers; they do not tune retrieval.
+RETRIEVAL_POLICIES = {
+    "official_score_only": {
+        "retrieval_topk": 5,
+        "candidate_pool_topk": 5,
+        "retrieval_strategy": "score_only",
+        "context_token_budget": None,
+        "max_context_chars_per_block": 8000,
+        "summary_limit": 0,
+    },
+    "unified_coverage_fit": {
+        "retrieval_topk": 5,
+        "candidate_pool_topk": 20,
+        "retrieval_strategy": "coverage_fit",
+        "context_token_budget": 8000,
+        "max_context_chars_per_block": 8000,
+        "summary_limit": 0,
+    },
+}
+
+
+def apply_retrieval_policy(config):
+    execution = config.setdefault("execution", {})
+    policy_name = execution.get("retrieval_policy")
+    if not policy_name:
+        return config
+    try:
+        policy = RETRIEVAL_POLICIES[policy_name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(RETRIEVAL_POLICIES))
+        raise ValueError(
+            f"Unsupported retrieval_policy={policy_name!r}; supported: {supported}"
+        ) from exc
+    execution.update(policy)
+    execution["retrieval_policy"] = policy_name
+    return config
 # ==========================================
 # 1. Environment Initialization
 # ==========================================
@@ -77,6 +116,7 @@ def main():
     
     try:
         config = load_config(config_path)
+        config = apply_retrieval_policy(config)
     except FileNotFoundError as e:
         print(f"[Error] {e}")
         return
