@@ -57,6 +57,8 @@ class BenchmarkPipeline:
                 'diversity_lambda': execution_cfg.get('diversity_lambda', 0.35),
                 'source_penalty': execution_cfg.get('source_penalty', 0.12),
                 'query_aware_summary_limit': execution_cfg.get('query_aware_summary_limit', 1),
+                'evidence_fit_min_score_ratio': execution_cfg.get('evidence_fit_min_score_ratio', 0.92),
+                'evidence_fit_max_per_source': execution_cfg.get('evidence_fit_max_per_source', 2),
                 'retrieve_max_retries': execution_cfg.get('retrieve_max_retries', 2),
                 'retrieve_retry_base_delay_s': execution_cfg.get('retrieve_retry_base_delay_s', 1.0),
             }
@@ -258,6 +260,8 @@ class BenchmarkPipeline:
             diversity_lambda = execution_cfg.get('diversity_lambda', 0.35)
             source_penalty = execution_cfg.get('source_penalty', 0.12)
             summary_limit = execution_cfg.get('summary_limit', 0)
+            min_score_ratio = execution_cfg.get('evidence_fit_min_score_ratio', 0.92)
+            max_per_source = execution_cfg.get('evidence_fit_max_per_source', 2)
 
             search_res = self.db.retrieve(query=enhanced_query, topk=candidate_pool_topk)
             latency = time.time() - t0
@@ -293,6 +297,8 @@ class BenchmarkPipeline:
                 source_penalty=source_penalty,
                 summary_limit=execution_cfg.get('query_aware_summary_limit', 1)
                 if strategy == 'query_aware' else summary_limit,
+                min_score_ratio=min_score_ratio,
+                max_per_source=max_per_source,
             )
 
             for candidate in selected_candidates:

@@ -173,3 +173,148 @@ def test_query_aware_interpretive_allows_one_summary_then_keeps_leaves():
     assert selected[0].level == 1
     assert selected[1].level == 2
     assert stats['query_type'] == 'interpretive'
+
+
+def test_evidence_fit_prefers_exact_leaf_over_high_score_summary():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        RetrievalCandidate(
+            uri='viking://resources/doc/.overview.md',
+            score=0.99,
+            level=1,
+            content='Overview mentions American Express liabilities and balance sheet topics.',
+            prompt_text='Overview mentions American Express liabilities and balance sheet topics.',
+            prompt_tokens=8,
+        ),
+        _candidate(
+            'viking://resources/doc/page-42.md',
+            0.94,
+            'American Express had customer deposits of USD 110.2 billion, the largest liability.',
+        ),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=1,
+        strategy='evidence_fit',
+        query='What was American Express largest liability and amount?',
+    )
+
+    assert selected[0].uri.endswith('page-42.md')
+    assert stats['strategy'] == 'evidence_fit'
+    assert stats['selected_leaf_count'] == 1
+
+
+def test_evidence_fit_uses_entity_and_number_overlap_as_tie_breaker():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        _candidate(
+            'viking://resources/doc/page-1.md',
+            0.95,
+            'PepsiCo restructuring costs were discussed broadly across segments.',
+        ),
+        _candidate(
+            'viking://resources/doc/page-2.md',
+            0.92,
+            'PepsiCo recorded restructuring costs of USD 411 million in 2023.',
+        ),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=1,
+        strategy='evidence_fit',
+        query='What were PepsiCo restructuring costs in 2023?',
+    )
+
+    assert selected[0].uri.endswith('page-2.md')
+    assert stats['selected_number_overlap_count'] == 1
+
+
+def test_evidence_fit_limits_same_source_redundancy():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        _candidate('viking://resources/docA/chunk1.md', 0.99, 'alpha beta gamma revenue'),
+        _candidate('viking://resources/docA/chunk2.md', 0.98, 'alpha beta gamma margin'),
+        _candidate('viking://resources/docB/chunk1.md', 0.96, 'alpha beta gamma cash flow'),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=2,
+        strategy='evidence_fit',
+        query='alpha beta gamma financial metric',
+        max_per_source=1,
+        min_score_ratio=0.0,
+    )
+
+    assert [item.source for item in selected] == [
+        'viking://resources/docA',
+        'viking://resources/docB',
+    ]
+    assert stats['source_counts']['viking://resources/docA'] == 1
+
+
+def test_coverage_fit_keeps_vector_anchor_and_adds_missing_number_evidence():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        _candidate(
+            'viking://resources/doc/page-1.md',
+            0.98,
+            'PepsiCo reported operating income and revenue for the year.',
+        ),
+        _candidate(
+            'viking://resources/doc/page-2.md',
+            0.83,
+            'PepsiCo restructuring costs were USD 411 million in 2023.',
+        ),
+        _candidate(
+            'viking://resources/doc/page-3.md',
+            0.81,
+            'PepsiCo discussed restructuring across several business segments.',
+        ),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=2,
+        strategy='coverage_fit',
+        query='What were PepsiCo restructuring costs in 2023?',
+    )
+
+    assert selected[0].uri.endswith('page-1.md')
+    assert selected[1].uri.endswith('page-2.md')
+    assert stats['selected_number_overlap_count'] == 1
+
+
+def test_coverage_fit_allows_multiple_chunks_from_one_source_for_calculation():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        _candidate(
+            'viking://resources/report/page-1.md',
+            0.97,
+            'FY2022 net income was 100 and FY2021 total assets were 900.',
+        ),
+        _candidate(
+            'viking://resources/report/page-2.md',
+            0.90,
+            'FY2022 total assets were 1100, needed for average total assets.',
+        ),
+        _candidate(
+            'viking://resources/other/page-1.md',
+            0.89,
+            'The report discusses general financial performance.',
+        ),
+    ]
+
+    selected, _ = packer.select(
+        candidates,
+        topk=2,
+        strategy='coverage_fit',
+        query='What is FY2022 return on assets using net income and average total assets?',
+    )
+
+    assert [item.uri for item in selected] == [
+        'viking://resources/report/page-1.md',
+        'viking://resources/report/page-2.md',
+    ]
