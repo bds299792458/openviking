@@ -70,7 +70,7 @@ _MULTI_HOP_RE = re.compile(
 _CALCULATION_RE = re.compile(
     r"\b(calculate|calculation|computed?|ratio|rate|percent|percentage|"
     r"margin|return on|per share|average|difference|growth|increase|"
-    r"decrease|turnover|ebitda|roa|roi|how much|what was the amount)\b",
+    r"decrease|turnover|how much|what was the amount)\b",
     re.IGNORECASE,
 )
 _COMPARISON_RE = re.compile(
