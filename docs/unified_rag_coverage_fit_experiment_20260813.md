@@ -171,3 +171,38 @@ The following checks passed on the server:
 - Existing retrieval-packing tests remained passing.
 - New tests cover leaf-over-summary preference, number/entity coverage,
   same-source multi-block calculation support, and redundancy behavior.
+
+## 10. Unified Iteration 3
+
+The next implementation iteration is recorded in commit `646d5927`.
+It keeps the same shared `coverage_fit` entry point and removes the remaining
+implicit dependency on numeric question categories. Query needs are inferred
+from question text, including temporal, multi-hop, interpretive,
+calculation, comparison, and list signals.
+
+The iteration adds four general mechanisms:
+
+1. Long retrieved resources are split into stable text units. The most
+   relevant unit is reserved first, then neighboring units are added when
+   the context budget allows. This prevents a fixed prefix truncation from
+   hiding the relevant middle or end of a resource.
+2. Complementary evidence is scored by marginal information gain. Words,
+   entities, numbers, dates, and relations already covered by selected blocks
+   contribute less to later candidates.
+3. Calculation and comparison questions receive a small generic preference
+   for candidates containing multiple numeric inputs and for adjacent blocks
+   from the same source. This is a structural evidence rule, not a financial
+   dataset rule.
+4. The selected context reports generic packing statistics such as
+   `needs_calculation`, `needs_comparison`, and `needs_list`, making the
+   selection decision auditable.
+
+The server ran 15 direct retrieval-packing tests successfully. Pytest itself
+is not installed in the `openvk` environment, so the test module was executed
+through a small direct runner after Python compilation and `git diff --check`
+passed.
+
+This iteration has not yet been claimed as a new end-to-end benchmark result.
+The existing LoCoMo and FinanceBench numbers above belong to the prior
+`coverage_fit` run and remain the comparison evidence until a clean
+cross-dataset rerun is completed.
