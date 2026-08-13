@@ -67,6 +67,21 @@ _MULTI_HOP_RE = re.compile(
     r"which .* and .*|who .* (work|know|meet)|how did .* lead|what .* after)\b",
     re.IGNORECASE,
 )
+_CALCULATION_RE = re.compile(
+    r"\b(calculate|calculation|computed?|ratio|rate|percent|percentage|"
+    r"margin|return on|per share|average|difference|growth|increase|"
+    r"decrease|turnover|ebitda|roa|roi|how much|what was the amount)\b",
+    re.IGNORECASE,
+)
+_COMPARISON_RE = re.compile(
+    r"\b(compare|comparison|versus|vs\.?|between|relative to|higher|lower|"
+    r"more than|less than|difference between|each|both)\b",
+    re.IGNORECASE,
+)
+_LIST_RE = re.compile(
+    r"\b(list|which ones|what are the|name the|all of|multiple|each of)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_uri(uri: str) -> str:
@@ -112,6 +127,12 @@ def _entities(text: str) -> Set[str]:
         if value and value not in _STOPWORDS:
             values.add(value)
     return values
+
+
+def _split_units(text: str) -> List[str]:
+    """Split a block into stable, human-readable units for prompt packing."""
+    raw_units = re.split(r"\n\s*\n+|\n(?=#{1,6}\s)|(?<=[.!?])\s+(?=[A-Z])", str(text or ""))
+    return [re.sub(r"\s+", " ", unit).strip() for unit in raw_units if unit.strip()]
 
 
 def _jaccard(left: Set[str], right: Set[str]) -> float:
@@ -184,10 +205,15 @@ class RetrievalPacker:
         contents: Sequence[str],
         *,
         max_chars_per_block: int = 8000,
+        query: str = "",
     ) -> List[RetrievalCandidate]:
         prepared: List[RetrievalCandidate] = []
         for result, content in zip(raw_results, contents):
-            prompt_text = str(content or "")[:max_chars_per_block]
+            prompt_text = self._prompt_excerpt(
+                str(content or ""),
+                query=query,
+                max_chars=max_chars_per_block,
+            )
             prepared.append(
                 RetrievalCandidate(
                     uri=str(result.get("uri", "")),
@@ -201,6 +227,62 @@ class RetrievalPacker:
                 )
             )
         return prepared
+
+    def _prompt_excerpt(self, content: str, *, query: str, max_chars: int) -> str:
+        """Keep the most query-relevant units when a resource is too long.
+
+        Retrieval recall still uses the complete resource content. This method
+        only controls the text sent to the generator, so a long resource cannot
+        hide its relevant middle or ending behind a fixed prefix cut.
+        """
+        if max_chars <= 0 or len(content) <= max_chars:
+            return content[:max_chars] if max_chars > 0 else content
+
+        query_words = _content_words(query)
+        query_entities = _entities(query)
+        query_numbers = _numbers(query)
+        units = _split_units(content)
+        if not units:
+            return content[:max_chars]
+
+        def unit_score(unit: str) -> float:
+            words = _content_words(unit)
+            entities = _entities(unit)
+            numbers = _numbers(unit)
+            score = 0.0
+            if query_words:
+                score += 2.0 * len(query_words & words) / len(query_words)
+            if query_entities:
+                score += 2.5 * len(query_entities & entities) / len(query_entities)
+            if query_numbers:
+                score += 2.5 * len(query_numbers & numbers) / len(query_numbers)
+            if _TEMPORAL_RE.search(query) and re.search(r"\b(?:19|20)\d{2}\b|\b\d{1,2}[/-]\d{1,2}\b", unit):
+                score += 0.35
+            if _CALCULATION_RE.search(query) and len(numbers) >= 2:
+                score += 0.25
+            return score
+
+        ranked_indexes = sorted(range(len(units)), key=lambda index: unit_score(units[index]), reverse=True)
+        selected_indexes: Set[int] = set()
+        used = 0
+        for index in ranked_indexes:
+            # Always reserve the highest-scoring unit first. Adjacent context
+            # is useful only after the evidence anchor fits the budget.
+            neighbors = [index, index - 1, index + 1]
+            for neighbor in neighbors:
+                if neighbor < 0 or neighbor >= len(units) or neighbor in selected_indexes:
+                    continue
+                addition = units[neighbor] if not selected_indexes else f"\n\n{units[neighbor]}"
+                if used + len(addition) > max_chars:
+                    continue
+                selected_indexes.add(neighbor)
+                used += len(addition)
+            if used >= max_chars:
+                break
+
+        if not selected_indexes:
+            return content[:max_chars]
+        return "\n\n".join(units[index] for index in sorted(selected_indexes))[:max_chars]
 
     def select(
         self,
@@ -273,17 +355,18 @@ class RetrievalPacker:
     def classify_query(query: str, question_category: Optional[str] = None) -> str:
         """Classify evidence needs without another model call.
 
-        LoCoMo categories are useful supervision when available, while the
-        lexical fallback keeps the policy usable for other benchmark adapters.
-        The labels describe selection needs, not answer semantics.
+        The profile is inferred from the question text so the same policy can
+        be used by every adapter. ``question_category`` remains in the
+        signature for adapter compatibility but is intentionally not used as a
+        dataset-specific routing signal. The labels describe selection needs,
+        not answer semantics.
         """
         text = str(query or "")
-        category = str(question_category or "")
-        if _TEMPORAL_RE.search(text) or category == "2":
+        if _TEMPORAL_RE.search(text):
             return "temporal"
-        if _MULTI_HOP_RE.search(text) or category == "3":
+        if _MULTI_HOP_RE.search(text):
             return "multi_hop"
-        if _INTERPRETIVE_RE.search(text) or category == "4":
+        if _INTERPRETIVE_RE.search(text):
             return "interpretive"
         return "factual"
 
@@ -414,6 +497,10 @@ class RetrievalPacker:
         query_words = _content_words(query)
         query_numbers = _numbers(query)
         query_entities = _entities(query)
+        query_lower = str(query or "").lower()
+        needs_calculation = bool(_CALCULATION_RE.search(query_lower))
+        needs_comparison = bool(_COMPARISON_RE.search(query_lower))
+        needs_list = bool(_LIST_RE.search(query_lower))
         budget = token_budget if token_budget and token_budget > 0 else None
         summary_slots = min(max(0, summary_limit), topk)
         if query_type in {"factual", "temporal", "multi_hop"}:
@@ -461,16 +548,24 @@ class RetrievalPacker:
             candidate_words = _content_words(candidate.prompt_text)
             candidate_numbers = candidate.number_set
             candidate_entities = candidate.entity_set
+            covered_words = set().union(*(_content_words(item.prompt_text) for item in selected))
+            covered_numbers = set().union(*(item.number_set for item in selected))
+            covered_entities = set().union(*(item.entity_set for item in selected))
             if query_words:
-                gain += len((query_words & candidate_words) - query_words.intersection(
-                    set().union(*(item.token_set for item in selected))
-                )) / len(query_words)
+                gain += 1.6 * len((query_words & candidate_words) - covered_words) / len(query_words)
             if query_numbers:
-                covered_numbers = set().union(*(item.number_set for item in selected))
                 gain += 1.5 * len((query_numbers & candidate_numbers) - covered_numbers) / len(query_numbers)
             if query_entities:
-                covered_entities = set().union(*(item.entity_set for item in selected))
                 gain += 1.5 * len((query_entities & candidate_entities) - covered_entities) / len(query_entities)
+            if needs_calculation:
+                if len(candidate_numbers) >= 2:
+                    gain += 0.20
+                elif candidate_numbers:
+                    gain += 0.06
+            if needs_comparison and len(candidate_numbers) >= 2:
+                gain += 0.12
+            if needs_list and re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s+", candidate.prompt_text):
+                gain += 0.10
             if query_type == "temporal" and candidate.has_date_signal:
                 gain += 0.15
             if query_type == "multi_hop" and candidate.has_relation_signal:
@@ -490,7 +585,26 @@ class RetrievalPacker:
                     default=0.0,
                 )
                 gain = coverage_gain(candidate)
-                value = 0.72 * candidate.score + 0.28 * gain - 0.12 * redundancy
+                source_continuity = 0.05 if (
+                    (needs_calculation or needs_comparison)
+                    and selected
+                    and candidate.source == selected[-1].source
+                ) else 0.0
+                source_novelty = 0.04 if (
+                    not needs_calculation
+                    and not needs_comparison
+                    and selected
+                    and candidate.source not in {item.source for item in selected}
+                ) else 0.0
+                cost_penalty = 0.04 * min(candidate.prompt_tokens / 1000.0, 2.0)
+                value = (
+                    0.70 * candidate.score
+                    + 0.30 * gain
+                    - 0.12 * redundancy
+                    - cost_penalty
+                    + source_continuity
+                    + source_novelty
+                )
                 if candidate.level < 2:
                     value -= 0.08
                 if best_value is None or value > best_value:
@@ -521,6 +635,9 @@ class RetrievalPacker:
                 "selected_date_signal_count": sum(item.has_date_signal for item in selected),
                 "selected_number_overlap_count": sum(bool(query_numbers & item.number_set) for item in selected),
                 "selected_entity_overlap_count": sum(bool(query_entities & item.entity_set) for item in selected),
+                "needs_calculation": needs_calculation,
+                "needs_comparison": needs_comparison,
+                "needs_list": needs_list,
             }
         )
         return selected, stats

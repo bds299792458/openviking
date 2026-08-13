@@ -285,6 +285,7 @@ class BenchmarkPipeline:
                 raw_results,
                 raw_contents,
                 max_chars_per_block=max_chars_per_block,
+                query=enhanced_query,
             )
             selected_candidates, packing_stats = self.retrieval_packer.select(
                 prepared,

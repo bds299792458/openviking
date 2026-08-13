@@ -318,3 +318,63 @@ def test_coverage_fit_allows_multiple_chunks_from_one_source_for_calculation():
         'viking://resources/report/page-1.md',
         'viking://resources/report/page-2.md',
     ]
+
+
+def test_query_classification_does_not_depend_on_dataset_category_numbers():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+
+    assert packer.classify_query("What happened after the meeting?", "2") == "temporal"
+    assert packer.classify_query("What is the meaning of the event?", "3") == "interpretive"
+    assert packer.classify_query("Who did the two speakers meet?", "4") == "multi_hop"
+    assert packer.classify_query("What is the course deadline?", "4") == "factual"
+
+
+def test_coverage_fit_prioritizes_calculation_inputs_from_same_source():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    candidates = [
+        _candidate(
+            'viking://resources/report/page-1.md',
+            0.96,
+            'Net income was 100 and total assets were 900.',
+        ),
+        _candidate(
+            'viking://resources/report/page-2.md',
+            0.88,
+            'Total assets were 1100 and average assets are needed.',
+        ),
+        _candidate(
+            'viking://resources/other/page-1.md',
+            0.90,
+            'The company discussed general strategy and outlook.',
+        ),
+    ]
+
+    selected, stats = packer.select(
+        candidates,
+        topk=2,
+        strategy='coverage_fit',
+        query='Calculate return on assets using net income and average total assets.',
+    )
+
+    assert [item.uri for item in selected] == [
+        'viking://resources/report/page-1.md',
+        'viking://resources/report/page-2.md',
+    ]
+    assert stats['needs_calculation'] is True
+
+
+def test_prepare_candidates_uses_relevant_middle_for_long_resources():
+    packer = RetrievalPacker(token_counter=lambda text: len(text.split()))
+    long_text = (
+        "General introduction without the answer.\n\n"
+        "The exact revenue was USD 411 million in 2023.\n\n"
+        "Additional unrelated discussion."
+    )
+    prepared = packer.prepare_candidates(
+        [{'uri': 'viking://resources/doc/page.md', 'score': 0.9, 'level': 2}],
+        [long_text],
+        query='What was the revenue in 2023?',
+        max_chars_per_block=80,
+    )
+
+    assert '411 million' in prepared[0].prompt_text
