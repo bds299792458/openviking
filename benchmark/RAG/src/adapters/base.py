@@ -18,9 +18,13 @@ _REFUSAL_PHRASES = (
 
 FINAL_ANSWER_RULE = """Output format:
 - Start with exactly one line: Final answer: <short final answer>
-- For yes/no questions, put Yes or No first, then only the essential qualifier if needed.
+- Answer exactly what the question asks. Do not add unrelated facts, guesses, or a general summary.
+- For yes/no questions, put Yes or No first and include only the essential qualifier needed by the question.
+- For date questions, output the exact date or time period supported by the evidence.
+- For list questions, include every distinct item required by the question, separated by commas or semicolons.
 - For numeric questions, put the final number and unit in the final answer line.
-- If a calculation is needed, add at most one short calculation line after the final answer.
+- If a calculation is needed, add at most one short formula line and then the final value.
+- If the evidence supports an answer, do not say "Insufficient information" or "Not mentioned".
 - Do not wrap the final answer in Markdown formatting."""
 
 

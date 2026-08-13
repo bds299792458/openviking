@@ -304,7 +304,14 @@ class BenchmarkPipeline:
             for candidate in selected_candidates:
                 retrieved_uris.append(candidate.uri)
                 retrieved_texts.append(candidate.content)
-                context_blocks.append(candidate.prompt_text)
+                if strategy == "coverage_fit":
+                    block_kind = "leaf" if candidate.level >= 2 else "summary"
+                    context_blocks.append(
+                        f"[Evidence {len(context_blocks) + 1} | {block_kind}]\n"
+                        f"{candidate.prompt_text}"
+                    )
+                else:
+                    context_blocks.append(candidate.prompt_text)
             
             recall = MetricsCalculator.check_recall(retrieved_texts, qa.evidence)
             
