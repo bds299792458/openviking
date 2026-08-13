@@ -9,6 +9,7 @@ evidence_text in evidence is used for recall calculation.
 
 import json
 import os
+import re
 from collections import defaultdict
 from typing import List, Dict, Any
 from pathlib import Path
@@ -40,6 +41,18 @@ CATEGORY_INSTRUCTIONS = {
 }
 
 MISSING_RULE = "If the provided context does not contain sufficient information to answer the question, respond with 'Insufficient information'."
+
+FINAL_ANSWER_RULE = """Output format:
+- Start with exactly one line: Final answer: <short final answer>
+- For yes/no questions, put Yes or No first, then only the essential qualifier if needed.
+- For numeric questions, put the final number and unit in the final answer line.
+- If a calculation is needed, add at most one short calculation line after the final answer.
+- Do not wrap the final answer in Markdown formatting."""
+
+
+def _clean_final_answer(answer: str) -> str:
+    answer = re.sub(r"[`*_]", "", str(answer or "")).strip()
+    return re.sub(r"\s+", " ", answer)
 
 
 class FinanceBenchAdapter(BaseAdapter):
@@ -147,6 +160,8 @@ class FinanceBenchAdapter(BaseAdapter):
 
 {MISSING_RULE}
 
+{FINAL_ANSWER_RULE}
+
 Question: {qa.question}
 
 Answer:"""
@@ -154,6 +169,8 @@ Answer:"""
             full_prompt = f"""{context_text}
 
 {MISSING_RULE}
+
+{FINAL_ANSWER_RULE}
 
 Question: {qa.question}
 
@@ -164,3 +181,30 @@ Answer:"""
             "financebench_id": qa.metadata.get("financebench_id"),
         }
         return full_prompt, meta
+
+    def post_process_answer(self, qa: StandardQA, raw_answer: str, meta: Dict[str, Any]) -> str:
+        answer = str(raw_answer or "").strip()
+        if not answer:
+            return answer
+
+        if re.search(r"\binsufficient information\b", answer, flags=re.IGNORECASE):
+            return "Insufficient information"
+
+        final_match = re.search(
+            r"(?im)^\s*(?:final\s+answer|answer)\s*:\s*(.+?)\s*$",
+            answer,
+        )
+        if final_match:
+            return _clean_final_answer(final_match.group(1))
+
+        # Older result files may not include an explicit final-answer marker.
+        # If the first line is already a concise answer span, keep it instead
+        # of a long derivation that dilutes token-level F1 on FinanceBench.
+        for line in answer.splitlines():
+            cleaned = _clean_final_answer(line)
+            if cleaned:
+                if len(cleaned.split()) <= 32:
+                    return cleaned
+                break
+
+        return _clean_final_answer(answer)

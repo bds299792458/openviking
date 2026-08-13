@@ -10,8 +10,8 @@ server worktree. It separates three kinds of evidence:
 - official README benchmark numbers, used as project-level public reference
 - local same-scale LoCoMo 10% controlled comparison, used to validate the
   query-aware retrieval-packing change
-- local FinanceBench small-sample run, used to diagnose why stronger retrieval
-  does not always translate into higher answer metrics
+- local FinanceBench 10% v1 run, used to validate a finance-specific answer
+  tightening and top-10 retrieval path
 
 The local runs use the stable `gpt-5.4-mini` route with
 `xop3qwen8bembedding` at 768 dimensions. API keys and private credentials are
@@ -66,16 +66,21 @@ than the old pre-optimization baseline. The result should therefore be read as
 a quality-oriented retrieval-packing improvement, not as a universal latency
 win.
 
-## Local FinanceBench Small-Sample Result
+## Local FinanceBench 10% v1 Result
 
-FinanceBench was run on the currently available 8-question sample under the
-original upstream-compatible path. The result shows a different bottleneck from
-LoCoMo: retrieval is often sufficient, but answer form and numeric extraction
-can dominate token-level F1.
+FinanceBench was the only dataset where the earlier query-aware run did not
+clear all three 5% gates: Recall and judge accuracy improved, but F1 fell. The
+new v1 route keeps the change narrow: it uses score-ordered top-10 retrieval and
+a FinanceBench-only final-answer rule/post-processor.
 
 | Dataset | Queries | Recall | F1 | Judge accuracy | Avg retrieval time | Avg input tokens | Avg output tokens |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| FinanceBench | 8 | 0.7500 | 0.2476 | 0.9375 | 0.194s | 14219.4 | 97.4 |
+| FinanceBench original top-5 | 15 | 0.1333 | 0.0209 | 0.0833 | 0.498s | 5325.4 | 24.7 |
+| FinanceBench query-aware old | 15 | 0.2000 | 0.0115 | 0.1000 | 0.205s | 5372.5 | 28.0 |
+| FinanceBench v1 top-10 + final answer | 15 | 0.5333 | 0.1509 | 0.4500 | 0.285s | 14003.6 | 19.1 |
+
+Relative to the original top-5 baseline, FinanceBench v1 improves Recall by
+300.00%, F1 by 623.13%, and normalized judge accuracy by 440.00%.
 
 Representative observations:
 
@@ -91,10 +96,10 @@ Representative observations:
   depends on exact numeric extraction, formula application, and concise final
   answer formatting.
 
-FinanceBench therefore should not be optimized mainly by increasing top-k. Its
-next useful improvement is a finance-specific answer layer: extract table
-values, preserve units, verify formulas, and return a short final answer span
-for numeric questions while still retaining the evidence trace.
+FinanceBench therefore should not be optimized mainly by generic query-aware
+diversity. Its next useful improvement is a finance-specific answer layer:
+extract table values, preserve units, verify formulas, and return a short final
+answer span for numeric questions while still retaining the evidence trace.
 
 ## Main Findings
 
@@ -132,5 +137,7 @@ VectorDB recall problem.
 - Official/local baseline distinction: `docs/official_reference_vs_10pct_optimization_20260812.md`
 - Iteration log: `docs/retrieval_packing_iteration_20260812.md`
 - FinanceBench result files:
-  `/home/shuaidong/hw/original_upstream_results/75a1447d_openvk_gpt54mini_fallback/rag_5pct/runs/FinanceBench/full/`
+  `/home/shuaidong/hw/original_upstream_results/financebench_fa_v1_20260813/runs/financebench_10pct_top10_score_only/`
+- 10% optimization progress summary:
+  `docs/rag_10pct_optimization_progress_20260813.md`
 
