@@ -174,7 +174,8 @@ The following checks passed on the server:
 
 ## 10. Unified Iteration 3
 
-The next implementation iteration is recorded in commit `646d5927`.
+The next implementation iteration is recorded in commits `646d5927` and
+`cb14e671`.
 It keeps the same shared `coverage_fit` entry point and removes the remaining
 implicit dependency on numeric question categories. Query needs are inferred
 from question text, including temporal, multi-hop, interpretive,
@@ -196,6 +197,10 @@ The iteration adds four general mechanisms:
 4. The selected context reports generic packing statistics such as
    `needs_calculation`, `needs_comparison`, and `needs_list`, making the
    selection decision auditable.
+
+The follow-up commit `cb14e671` removes domain-specific calculation keywords,
+leaving only general structural signals such as ratio, percentage, average,
+difference, growth, and amount.
 
 The server ran 15 direct retrieval-packing tests successfully. Pytest itself
 is not installed in the `openvk` environment, so the test module was executed
