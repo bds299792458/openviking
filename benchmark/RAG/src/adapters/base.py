@@ -1,12 +1,88 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Union, Optional
+import re
 import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 from core.logger import get_logger
+
+
+_REFUSAL_PHRASES = (
+    "insufficient information",
+    "not mentioned",
+    "no information",
+)
+
+FINAL_ANSWER_RULE = """Output format:
+- Start with exactly one line: Final answer: <short final answer>
+- For yes/no questions, put Yes or No first, then only the essential qualifier if needed.
+- For numeric questions, put the final number and unit in the final answer line.
+- If a calculation is needed, add at most one short calculation line after the final answer.
+- Do not wrap the final answer in Markdown formatting."""
+
+
+def _clean_answer_line(line: str) -> str:
+    line = re.sub(r"[`*_]", "", line)
+    line = re.sub(r"\s+", " ", line).strip()
+    line = re.sub(r"^[>\-\*\u2022\uf0b7]+\s*", "", line)
+    line = re.sub(r"^\d+[.)]\s*", "", line)
+    return line
+
+
+def normalize_answer_text(raw_answer: str) -> str:
+    """
+    Normalize a raw model answer into a concise final answer.
+
+    The function prefers explicit final-answer markers, preserves refusal/
+    missing-information phrases, and otherwise falls back to the last
+    meaningful line.
+    """
+    if raw_answer is None:
+        return ""
+
+    text = str(raw_answer).replace(chr(13) + chr(10), chr(10)).replace(chr(13), chr(10))
+    text = text.replace("```", "")
+    text = re.sub(r"(?im)^\s*```[a-z0-9_-]*\s*$", "", text)
+
+    cleaned_lines = []
+    for line in text.split("\n"):
+        cleaned = _clean_answer_line(line)
+        if cleaned:
+            cleaned_lines.append(cleaned)
+
+    if not cleaned_lines:
+        return ""
+
+    label_pattern = re.compile(
+        r"^(?:"
+        r"final answer|answer|conclusion|result"
+        r")\s*(?:[:：\-—]|is)\s*(.+)$",
+        re.IGNORECASE,
+    )
+
+    for line in reversed(cleaned_lines):
+        low = line.lower()
+
+        for phrase in _REFUSAL_PHRASES:
+            if phrase in low:
+                if "insufficient information" in low:
+                    return "Insufficient information"
+                if "not mentioned" in low or "no information" in low:
+                    return "Not mentioned"
+
+        match = label_pattern.match(line)
+        if match:
+            tail = match.group(1).strip()
+            if tail:
+                return tail
+
+    if len(cleaned_lines) == 1:
+        return cleaned_lines[0]
+
+    return cleaned_lines[-1]
 
 
 @dataclass
@@ -74,6 +150,6 @@ class BaseAdapter(ABC):
 
     def post_process_answer(self, qa: StandardQA, raw_answer: str, meta: Dict[str, Any]) -> str:
         """
-        Post-process raw LLM output (default implementation only strips whitespace).
+        Post-process raw LLM output using a shared final-answer normalizer.
         """
-        return raw_answer.strip()
+        return normalize_answer_text(raw_answer)

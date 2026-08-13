@@ -3,7 +3,7 @@ import json
 import os
 from typing import List, Dict, Any
 
-from .base import BaseAdapter, StandardDoc, StandardSample, StandardQA
+from .base import FINAL_ANSWER_RULE, BaseAdapter, StandardDoc, StandardSample, StandardQA
 
 
 MISSING_RULE = "If no information is available to answer the question, write 'Not mentioned'."
@@ -167,6 +167,8 @@ class LocomoAdapter(BaseAdapter):
 
 {MISSING_RULE}
 
+{FINAL_ANSWER_RULE}
+
 ---
 {category_instruction}
 
@@ -178,6 +180,8 @@ Answer:"""
 
 {MISSING_RULE}
 
+{FINAL_ANSWER_RULE}
+
 Based on the conversation above, answer the following question.
 Use ONLY the provided context. Do NOT invent any information.
 
@@ -188,5 +192,3 @@ Answer:"""
         meta = {"category": category}
         return full_prompt, meta
 
-    def post_process_answer(self, qa: StandardQA, raw_answer: str, meta: Dict[str, Any]) -> str:
-        return raw_answer.strip()
