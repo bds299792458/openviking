@@ -8,45 +8,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 from src.core.logger import setup_logging
-
-
-# Resolve one retrieval policy before the adapter or pipeline is initialized.
-# Adapters only parse data and format answers; they do not tune retrieval.
-RETRIEVAL_POLICIES = {
-    "official_score_only": {
-        "retrieval_topk": 5,
-        "candidate_pool_topk": 5,
-        "retrieval_strategy": "score_only",
-        "context_token_budget": None,
-        "max_context_chars_per_block": 8000,
-        "summary_limit": 0,
-    },
-    "unified_coverage_fit": {
-        "retrieval_topk": 5,
-        "candidate_pool_topk": 20,
-        "retrieval_strategy": "coverage_fit",
-        "context_token_budget": 8000,
-        "max_context_chars_per_block": 8000,
-        "summary_limit": 0,
-    },
-}
-
-
-def apply_retrieval_policy(config):
-    execution = config.setdefault("execution", {})
-    policy_name = execution.get("retrieval_policy")
-    if not policy_name:
-        return config
-    try:
-        policy = RETRIEVAL_POLICIES[policy_name]
-    except KeyError as exc:
-        supported = ", ".join(sorted(RETRIEVAL_POLICIES))
-        raise ValueError(
-            f"Unsupported retrieval_policy={policy_name!r}; supported: {supported}"
-        ) from exc
-    execution.update(policy)
-    execution["retrieval_policy"] = policy_name
-    return config
+from src.core.retrieval_policy import apply_retrieval_policy
 # ==========================================
 # 1. Environment Initialization
 # ==========================================
@@ -172,6 +134,7 @@ def main():
             ingest_wait_timeout_s=execution_cfg.get('ingest_wait_timeout_s'),
             retrieve_max_retries=execution_cfg.get('retrieve_max_retries', 2),
             retrieve_retry_base_delay_s=execution_cfg.get('retrieve_retry_base_delay_s', 1.0),
+            document_cache_dir=config.get('paths', {}).get('doc_output_dir'),
         )
         
         # 3. LLM Client

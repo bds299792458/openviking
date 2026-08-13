@@ -8,6 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import tiktoken
 from adapters.base import StandardDoc
+from core.document_preprocessor import DocumentPreprocessor
 from openviking_sdk import SyncHTTPClient
 
 
@@ -19,6 +20,7 @@ class VikingStoreWrapper:
         ingest_wait_timeout_s=3600,
         retrieve_max_retries=2,
         retrieve_retry_base_delay_s=1.0,
+        document_cache_dir=None,
     ):
         if sdk_timeout_s is None:
             sdk_timeout_s = 600
@@ -36,6 +38,8 @@ class VikingStoreWrapper:
         self.ingest_wait_timeout_s = ingest_wait_timeout_s
         self.retrieve_max_retries = max(0, int(retrieve_max_retries or 0))
         self.retrieve_retry_base_delay_s = max(0.0, float(retrieve_retry_base_delay_s or 0.0))
+        self.document_preprocessor = DocumentPreprocessor()
+        self.document_cache_dir = document_cache_dir
 
         try:
             self.enc = tiktoken.get_encoding("cl100k_base")
@@ -68,9 +72,20 @@ class VikingStoreWrapper:
                 "input_tokens": 0,
                 "output_tokens": 0
             }
+
+        prepared_samples = [
+            StandardDoc(
+                sample_id=sample.sample_id,
+                doc_path=self.document_preprocessor.prepare(
+                    sample.doc_path,
+                    output_dir=self.document_cache_dir,
+                ),
+            )
+            for sample in samples
+        ]
         
         if ingest_mode == "directory":
-            doc_paths = [os.path.abspath(s.doc_path) for s in samples]
+            doc_paths = [os.path.abspath(s.doc_path) for s in prepared_samples]
             common_ancestor = None
             if doc_paths:
                 try:
@@ -89,7 +104,7 @@ class VikingStoreWrapper:
                 total_output_tokens = llm_tokens.get("output", 0)
                 total_embedding_tokens = embedding_tokens.get("total", 0)
             else:
-                for sample in samples:
+                for sample in prepared_samples:
                     result = self._ingest_resource(sample.doc_path)
                     telemetry = result.get("telemetry", {})
                     summary = telemetry.get("summary", {})
@@ -100,7 +115,7 @@ class VikingStoreWrapper:
                     total_output_tokens += llm_tokens.get("output", 0)
                     total_embedding_tokens += embedding_tokens.get("total", 0)
         else:
-            for sample in samples:
+            for sample in prepared_samples:
                 result = self._ingest_resource(sample.doc_path)
                 telemetry = result.get("telemetry", {})
                 summary = telemetry.get("summary", {})
