@@ -129,6 +129,47 @@ def _entities(text: str) -> Set[str]:
     return values
 
 
+def _normalized_anchor_tokens(text: str) -> Set[str]:
+    return {
+        token
+        for token in _TOKEN_RE.findall(str(text or "").lower())
+        if len(token) > 1 and token not in _STOPWORDS
+    }
+
+
+def _query_anchors(query: str) -> List[Set[str]]:
+    """Extract explicit object/document anchors from the question text."""
+    text = str(query or "")
+    anchors: List[Set[str]] = []
+    seen: Set[Tuple[str, ...]] = set()
+    quoted_spans = re.findall(r'"([^"]{3,})"|\'([^\']{3,})\'', text)
+    for double_quoted, single_quoted in quoted_spans:
+        tokens = _normalized_anchor_tokens(double_quoted or single_quoted)
+        if len(tokens) < 2:
+            continue
+        key = tuple(sorted(tokens))
+        if key not in seen:
+            anchors.append(tokens)
+            seen.add(key)
+    return anchors
+
+
+def _anchor_match_ratio(anchor: Set[str], text: str) -> float:
+    if not anchor:
+        return 0.0
+    tokens = _normalized_anchor_tokens(text.replace("_", " ").replace("-", " "))
+    if not tokens:
+        return 0.0
+    return len(anchor & tokens) / len(anchor)
+
+
+def _candidate_anchor_match(candidate: "RetrievalCandidate", anchors: Sequence[Set[str]]) -> bool:
+    if not anchors:
+        return False
+    target = f"{candidate.source} {candidate.base_uri}"
+    return any(_anchor_match_ratio(anchor, target) >= 0.6 for anchor in anchors)
+
+
 def _split_units(text: str) -> List[str]:
     """Split a block into stable, human-readable units for prompt packing."""
     raw_units = re.split(r"\n\s*\n+|\n(?=#{1,6}\s)|(?<=[.!?])\s+(?=[A-Z])", str(text or ""))
@@ -498,6 +539,7 @@ class RetrievalPacker:
         query_numbers = _numbers(query)
         query_entities = _entities(query)
         query_lower = str(query or "").lower()
+        query_anchors = _query_anchors(query)
         needs_calculation = bool(_CALCULATION_RE.search(query_lower))
         needs_comparison = bool(_COMPARISON_RE.search(query_lower))
         needs_list = bool(_LIST_RE.search(query_lower))
@@ -507,8 +549,25 @@ class RetrievalPacker:
             summary_slots = 0
 
         leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        anchored_ordered = [
+            candidate for candidate in ordered if _candidate_anchor_match(candidate, query_anchors)
+        ]
+        anchored_leaves = [
+            candidate for candidate in leaves if _candidate_anchor_match(candidate, query_anchors)
+        ]
+        if (
+            query_anchors
+            and query_type != "multi_hop"
+            and any(candidate.level < 2 for candidate in anchored_ordered)
+        ):
+            summary_slots = min(1, topk)
         anchor_pool = leaves if leaves and query_type != "interpretive" else list(ordered)
+        if query_anchors and query_type != "multi_hop":
+            anchor_pool = anchored_leaves or anchored_ordered or anchor_pool
         anchor = max(anchor_pool, key=lambda item: item.score)
+        anchored_sources = {
+            candidate.source for candidate in anchored_ordered
+        } if query_anchors else set()
 
         selected: List[RetrievalCandidate] = []
         seen_uris: Set[str] = set()
@@ -575,10 +634,24 @@ class RetrievalPacker:
         while remaining and len(selected) < topk:
             best = None
             best_value = None
+            anchor_candidate_available = bool(
+                query_anchors
+                and query_type != "multi_hop"
+                and anchored_sources
+                and any(
+                    candidate.source in anchored_sources
+                    and candidate.level >= 2
+                    and candidate.base_uri not in seen_uris
+                    and (budget is None or not selected or used_tokens + candidate.prompt_tokens <= budget)
+                    for candidate in remaining
+                )
+            )
             for candidate in remaining:
                 if candidate.level < 2 and summary_count >= summary_slots:
                     continue
                 if budget is not None and selected and used_tokens + candidate.prompt_tokens > budget:
+                    continue
+                if anchor_candidate_available and candidate.source not in anchored_sources:
                     continue
                 redundancy = max(
                     (_jaccard(candidate.token_set, chosen.token_set) for chosen in selected),
@@ -593,9 +666,16 @@ class RetrievalPacker:
                 source_novelty = 0.04 if (
                     not needs_calculation
                     and not needs_comparison
+                    and not query_anchors
                     and selected
                     and candidate.source not in {item.source for item in selected}
                 ) else 0.0
+                source_grounding = 0.0
+                if query_anchors and query_type != "multi_hop":
+                    if candidate.source in anchored_sources:
+                        source_grounding += 0.18
+                    elif anchored_sources:
+                        source_grounding -= 0.22
                 cost_penalty = 0.04 * min(candidate.prompt_tokens / 1000.0, 2.0)
                 value = (
                     0.70 * candidate.score
@@ -604,6 +684,7 @@ class RetrievalPacker:
                     - cost_penalty
                     + source_continuity
                     + source_novelty
+                    + source_grounding
                 )
                 if candidate.level < 2:
                     value -= 0.08
@@ -625,6 +706,7 @@ class RetrievalPacker:
             add(best)
             remaining.remove(best)
 
+        selected = sorted(selected, key=lambda item: item.score, reverse=True)
         stats = self._stats("coverage_fit", ordered, selected, budget, dropped=dropped)
         stats.update(
             {
@@ -638,6 +720,8 @@ class RetrievalPacker:
                 "needs_calculation": needs_calculation,
                 "needs_comparison": needs_comparison,
                 "needs_list": needs_list,
+                "query_anchor_count": len(query_anchors),
+                "anchored_source_count": len(anchored_sources),
             }
         )
         return selected, stats

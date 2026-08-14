@@ -19,6 +19,7 @@ _REFUSAL_PHRASES = (
 FINAL_ANSWER_RULE = """Output format:
 - Start with exactly one line: Final answer: <short final answer>
 - Answer exactly what the question asks. Do not add unrelated facts, guesses, or a general summary.
+- Prefer a short complete answer phrase or sentence over a bare fragment when the question asks for a relation, count, outcome, reason, or comparison.
 - For yes/no questions, put Yes or No first and include only the essential qualifier needed by the question.
 - For date questions, output the exact date or time period supported by the evidence.
 - For list questions, include every distinct item required by the question, separated by commas or semicolons.
