@@ -19,6 +19,7 @@ TRANSIENT_ERROR_MARKERS = (
     "timeout occurred",
     "temporarily unavailable",
     "service unavailable",
+    "unknown provider for model",
 )
 
 PERMANENT_ERROR_MARKERS = (
