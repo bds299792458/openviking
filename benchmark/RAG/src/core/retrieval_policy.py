@@ -38,6 +38,7 @@ def apply_retrieval_policy(config):
         raise ValueError(
             f"Unsupported retrieval_policy={policy_name!r}; supported: {supported}"
         ) from exc
-    execution.update(policy)
+    for key, value in policy.items():
+        execution.setdefault(key, value)
     execution["retrieval_policy"] = policy_name
     return config
