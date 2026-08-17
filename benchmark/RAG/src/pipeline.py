@@ -17,6 +17,48 @@ from core.vector_store import VikingStoreWrapper
 from core.monitor import BenchmarkMonitor
 from core.metrics import MetricsCalculator
 from core.judge_util import llm_grader
+from core.source_page_index import SourcePageIndex
+_SOURCE_GENERIC_TOKENS = {
+    'doc', 'docs', 'document', 'report', 'reports', 'paper', 'papers',
+    'pdf', 'earnings', 'annual', 'fiscal', 'fy', 'q1', 'q2', 'q3', 'q4',
+}
+
+
+def _source_hint_tokens(text):
+    tokens = set(re.findall(r'[a-z0-9]+', str(text or '').lower()))
+    return {
+        token for token in tokens
+        if token not in _SOURCE_GENERIC_TOKENS
+        and not re.fullmatch(r'(?:19|20)\d{2}(?:q[1-4])?', token)
+        and not token.isdigit()
+        and len(token) >= 3
+    }
+
+
+def _compact_source_text(text):
+    return re.sub(r'[^a-z0-9]+', '', str(text or '').lower())
+
+
+def _resource_root(uri):
+    match = re.match(r'^(viking://resources/[^/]+)', str(uri or ''))
+    return match.group(1) if match else ''
+
+
+def _query_mentions_source(sample_id, query):
+    source_tokens = _source_hint_tokens(sample_id)
+    if not source_tokens:
+        return False
+    query_tokens = set(re.findall(r'[a-z0-9]+', str(query or '').lower()))
+    if source_tokens & query_tokens:
+        return True
+    compact_query = _compact_source_text(query)
+    return any(len(token) >= 5 and token in compact_query for token in source_tokens)
+
+
+def _root_matches_source(sample_id, root):
+    source_tokens = _source_hint_tokens(sample_id)
+    root_tokens = _source_hint_tokens(root)
+    return bool(source_tokens and root_tokens and source_tokens & root_tokens)
 
 
 class BenchmarkPipeline:
@@ -28,6 +70,9 @@ class BenchmarkPipeline:
         self.logger = get_logger()
         self.monitor = BenchmarkMonitor()
         self.retrieval_packer = RetrievalPacker(token_counter=self.db.count_tokens)
+        self.source_page_index = SourcePageIndex(
+            self.config.get("paths", {}).get("doc_output_dir")
+        )
         
         self.output_dir = self.config['paths']['output_dir']
         if not os.path.exists(self.output_dir):
@@ -267,6 +312,59 @@ class BenchmarkPipeline:
             latency = time.time() - t0
             
             raw_results = list(search_res.get("resources", []))
+            retrieval_scope = 'global'
+            scoped_root = ''
+
+            # If the query names the document/object represented by this
+            # sample, search inside the matched resource root as a second
+            # pass. This is a generic source-aware retrieval step rather than
+            # a dataset-specific answer rule.
+            sample_id = str(task.get('sample_id', ''))
+            if _query_mentions_source(sample_id, enhanced_query):
+                root_scores = {}
+                for result in raw_results:
+                    root = _resource_root(result.get('uri', ''))
+                    if not _root_matches_source(sample_id, root):
+                        continue
+                    score = float(result.get('score', 0.0) or 0.0)
+                    root_scores[root] = max(score, root_scores.get(root, float('-inf')))
+
+                if root_scores:
+                    scoped_root = max(root_scores, key=root_scores.get)
+                    scoped_res = self.db.retrieve(
+                        query=enhanced_query,
+                        topk=candidate_pool_topk,
+                        target_uri=scoped_root,
+                    )
+                    scoped_results = list(scoped_res.get('resources', []))
+                    if scoped_results:
+                        raw_results = scoped_results
+                        retrieval_scope = 'source_scoped'
+                        latency = time.time() - t0
+
+            if execution_cfg.get("source_page_fallback", True):
+                page_results = self.source_page_index.search(
+                    sample_id,
+                    enhanced_query,
+                    limit=int(
+                        execution_cfg.get(
+                            "source_page_candidate_limit",
+                            max(candidate_pool_topk, retrieval_topk),
+                        )
+                    ),
+                )
+                existing_uris = {str(item.get("uri", "")) for item in raw_results}
+                for page_result in page_results:
+                    if page_result["uri"] not in existing_uris:
+                        raw_results.append(page_result)
+                        existing_uris.add(page_result["uri"])
+                if page_results:
+                    retrieval_scope = (
+                        "global+source_page"
+                        if retrieval_scope == "global"
+                        else f"{retrieval_scope}+source_page"
+                    )
+
             retrieved_texts = []
             retrieved_uris = []
             context_blocks = []
@@ -274,6 +372,9 @@ class BenchmarkPipeline:
             
             for result in raw_results:
                 uri = result["uri"]
+                if result.get("_content") is not None:
+                    raw_contents.append(str(result["_content"]))
+                    continue
                 content = (
                     self.db.read_resource(uri)
                     if result.get("level", 2) == 2
@@ -302,6 +403,13 @@ class BenchmarkPipeline:
                 max_per_source=max_per_source,
             )
 
+            packing_stats.update(
+                {
+                    'retrieval_scope': retrieval_scope,
+                    'scoped_root': scoped_root,
+                    'sample_id_source_hint': sample_id,
+                }
+            )
             for candidate in selected_candidates:
                 retrieved_uris.append(candidate.uri)
                 retrieved_texts.append(candidate.content)
