@@ -424,11 +424,36 @@ class BenchmarkPipeline:
             
             recall = MetricsCalculator.check_recall(retrieved_texts, qa.evidence)
             
+            conservative_context_blocks = None
+            if execution_cfg.get('answer_candidate_selection', False):
+                conservative_context_blocks = self._build_conservative_context(
+                    search_res,
+                    enhanced_query,
+                    topk=int(execution_cfg.get('answer_candidate_conservative_topk', 5)),
+                    max_chars_per_block=max_chars_per_block,
+                )
+
             full_prompt, meta = self.adapter.build_prompt(qa, context_blocks)
             
             ans_raw = self.llm.generate(full_prompt)
 
             ans = self.adapter.post_process_answer(qa, ans_raw, meta)
+            if execution_cfg.get('answer_temporal_repair', False):
+                ans = self._repair_temporal_answer(qa.question, context_blocks, ans)
+
+            answer_selection = None
+            if conservative_context_blocks:
+                conservative_prompt, conservative_meta = self.adapter.build_prompt(qa, conservative_context_blocks)
+                conservative_raw = self.llm.generate(conservative_prompt)
+                conservative_answer = self.adapter.post_process_answer(qa, conservative_raw, conservative_meta)
+                ans, answer_selection = self._select_supported_answer(
+                    qa.question,
+                    context_blocks,
+                    ans,
+                    conservative_context_blocks,
+                    conservative_answer,
+                    execution_cfg,
+                )
 
             in_tokens = self.db.count_tokens(full_prompt) + self.db.count_tokens(qa.question)
             out_tokens = self.db.count_tokens(ans)
@@ -445,12 +470,150 @@ class BenchmarkPipeline:
                     "candidate_pool_topk": candidate_pool_topk,
                     "packing": packing_stats,
                 },
-                "llm": {"final_answer": ans},
+                "llm": {"final_answer": ans, "answer_selection": answer_selection},
                 "metrics": {"Recall": recall}, "token_usage": {"total_input_tokens": in_tokens, "llm_output_tokens": out_tokens}
             }
         except Exception:
             self.monitor.worker_end(success=False)
             raise
+
+    def _build_conservative_context(self, search_res, enhanced_query: str, *, topk: int, max_chars_per_block: int) -> list[str]:
+        raw_results = list(search_res.get("resources", []))[:topk]
+        if not raw_results:
+            return []
+        raw_contents = []
+        for result in raw_results:
+            uri = result["uri"]
+            if result.get("_content") is not None:
+                raw_contents.append(str(result["_content"]))
+                continue
+            content = (
+                self.db.read_resource(uri)
+                if result.get("level", 2) == 2
+                else f"{result.get('abstract', '')}\n{result.get('overview', '')}"
+            )
+            raw_contents.append(content)
+        prepared = self.retrieval_packer.prepare_candidates(
+            raw_results,
+            raw_contents,
+            max_chars_per_block=max_chars_per_block,
+            query=enhanced_query,
+        )
+        selected, _ = self.retrieval_packer.select(
+            prepared,
+            topk=topk,
+            strategy="score_only",
+            query=enhanced_query,
+        )
+        return [candidate.prompt_text for candidate in selected]
+
+    def _repair_temporal_answer(self, question: str, context_blocks: list[str], answer: str) -> str:
+        question_text = str(question or '')
+        if not re.search(r'\bwhen\b|\bwhat (?:date|year|month|time)\b', question_text, re.IGNORECASE):
+            return answer
+        answer_text = str(answer or '').strip()
+        if not answer_text:
+            return answer
+        context_text = '\n\n'.join(context_blocks)
+        if len(context_text) > 12000:
+            context_text = context_text[:12000]
+        prompt = (
+            'Use only the evidence below to verify the temporal answer.\n'
+            'If the current answer is exactly supported, repeat it unchanged.\n'
+            'If it is relative, off by a nearby date, or unsupported, replace it with the most specific date/time span explicitly supported by the evidence.\n'
+            'Return only the corrected short answer. Do not explain.\n\n'
+            f'Evidence:\n{context_text}\n\nQuestion: {question_text}\nCurrent answer: {answer_text}\nCorrected answer:'
+        )
+        try:
+            repaired = self.llm.generate(prompt).strip()
+        except Exception as error:
+            self.logger.warning(f'Temporal answer repair failed: {error}')
+            return answer
+        return repaired.splitlines()[0].strip() if repaired else answer
+
+    def _select_supported_answer(
+        self,
+        question: str,
+        primary_context_blocks: list[str],
+        primary_answer: str,
+        conservative_context_blocks: list[str],
+        conservative_answer: str,
+        execution_cfg: dict,
+    ):
+        primary = str(primary_answer or "").strip()
+        conservative = str(conservative_answer or "").strip()
+        if not conservative or self._same_answer(primary, conservative):
+            return primary_answer, {
+                "selected": "primary",
+                "method": "shortcut",
+                "conservative_answer": conservative,
+            }
+        if not primary:
+            return conservative_answer, {
+                "selected": "conservative",
+                "method": "empty_primary",
+                "conservative_answer": conservative,
+            }
+        primary_lower = primary.lower()
+        conservative_lower = conservative.lower()
+        not_mentioned = ("not mentioned", "not found", "unknown", "no answer")
+        if any(marker in primary_lower for marker in not_mentioned) and not any(
+            marker in conservative_lower for marker in not_mentioned
+        ):
+            return conservative_answer, {
+                "selected": "conservative",
+                "method": "not_mentioned_guard",
+                "conservative_answer": conservative,
+            }
+        if self._is_temporal_question(question):
+            if not self._has_temporal_signal(primary) and self._has_temporal_signal(conservative):
+                return conservative_answer, {
+                    "selected": "conservative",
+                    "method": "temporal_specificity_guard",
+                    "conservative_answer": conservative,
+                }
+
+        max_chars = int(execution_cfg.get("answer_candidate_selector_max_chars", 12000) or 12000)
+        evidence = "\n\n".join(primary_context_blocks + conservative_context_blocks)
+        if len(evidence) > max_chars:
+            evidence = evidence[:max_chars]
+        prompt = (
+            "Choose the answer that is better supported by the evidence and better answers the question.\n"
+            "Prefer the answer with the required specific entity, date, amount, list item, or causal detail.\n"
+            "Penalize answers that say the information is missing when another candidate is directly supported.\n"
+            "If both answers are equally supported, choose A.\n"
+            "Return only A or B.\n\n"
+            f"Question: {question}\n\nEvidence:\n{evidence}\n\n"
+            f"A: {primary}\nB: {conservative}\nChoice:"
+        )
+        try:
+            choice = self.llm.generate(prompt).strip().upper()
+        except Exception as error:
+            self.logger.warning(f"Answer candidate selection failed: {error}")
+            return primary_answer, {
+                "selected": "primary",
+                "method": "selector_error",
+                "conservative_answer": conservative,
+            }
+        selected = "conservative" if choice.startswith("B") else "primary"
+        return (conservative_answer if selected == "conservative" else primary_answer), {
+            "selected": selected,
+            "method": "llm_selector",
+            "choice": choice[:16],
+            "conservative_answer": conservative,
+        }
+
+    @staticmethod
+    def _same_answer(left: str, right: str) -> bool:
+        return re.sub(r"\W+", "", str(left or "").lower()) == re.sub(r"\W+", "", str(right or "").lower())
+
+    @staticmethod
+    def _is_temporal_question(question: str) -> bool:
+        return bool(re.search(r"\bwhen\b|\bwhat (?:date|year|month|time)\b|\bhow long\b", str(question or ""), re.IGNORECASE))
+
+    @staticmethod
+    def _has_temporal_signal(answer: str) -> bool:
+        return bool(re.search(r"\b(?:19|20)\d{2}\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b|\b\d{1,2}[/-]\d{1,2}\b|\b(?:ago|week|month|year)\b", str(answer or ""), re.IGNORECASE))
 
     def _process_evaluation_task(self, item):
         """

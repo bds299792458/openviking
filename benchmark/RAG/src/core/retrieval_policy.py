@@ -21,6 +21,9 @@ RETRIEVAL_POLICIES = {
         "context_token_budget": 8000,
         "max_context_chars_per_block": 8000,
         "summary_limit": 0,
+        "answer_candidate_selection": True,
+        "answer_candidate_conservative_topk": 5,
+        "answer_candidate_selector_max_chars": 12000,
     },
 }
 
