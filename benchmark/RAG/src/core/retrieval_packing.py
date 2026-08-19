@@ -7,6 +7,9 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 _TOKEN_RE = re.compile(r"\w+")
 _NUMBER_RE = re.compile(r"\b(?:\d+(?:[.,]\d+)*|\d+(?:\.\d+)?%|(?:19|20)\d{2})\b")
+_RANGE_RE = re.compile(
+    r"(?<!\w)(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)(?:\s*%)?"
+)
 _ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,4}\b")
 _STOPWORDS = {
     "a",
@@ -120,6 +123,35 @@ def _numbers(text: str) -> Set[str]:
     return {match.group(0).replace(",", "").lower() for match in _NUMBER_RE.finditer(str(text or ""))}
 
 
+def _number_values(text: str) -> Set[float]:
+    values: Set[float] = set()
+    for match in _NUMBER_RE.finditer(str(text or "")):
+        raw = match.group(0).replace(",", "").replace("%", "")
+        try:
+            values.add(float(raw))
+        except ValueError:
+            continue
+    return values
+
+
+def _range_hits(query: str, candidate: str) -> int:
+    query_values = _number_values(query)
+    if not query_values:
+        return 0
+    ranges = []
+    for match in _RANGE_RE.finditer(str(candidate or "")):
+        try:
+            left = float(match.group(1).replace(",", ""))
+            right = float(match.group(2).replace(",", ""))
+        except ValueError:
+            continue
+        ranges.append((min(left, right), max(left, right)))
+    return sum(
+        any(left <= value <= right for left, right in ranges)
+        for value in query_values
+    )
+
+
 def _entities(text: str) -> Set[str]:
     values = set()
     for match in _ENTITY_RE.finditer(str(text or "")):
@@ -151,6 +183,23 @@ def _query_anchors(query: str) -> List[Set[str]]:
         if key not in seen:
             anchors.append(tokens)
             seen.add(key)
+
+    # Questions in FinanceBench and similar datasets often mention the target
+    # company or document only as a normal capitalized phrase rather than a
+    # quoted title. Promote those named entities into anchors too, while
+    # keeping a compact concatenated form so "American Express" can match
+    # "AMERICANEXPRESS" style resource paths.
+    for entity in _entities(text):
+        entity_tokens = _normalized_anchor_tokens(entity)
+        compact = re.sub(r"[^a-z0-9]+", "", entity.lower())
+        if compact:
+            entity_tokens.add(compact)
+        if len(entity_tokens) < 1:
+            continue
+        key = tuple(sorted(entity_tokens))
+        if key not in seen:
+            anchors.append(entity_tokens)
+            seen.add(key)
     return anchors
 
 
@@ -166,8 +215,8 @@ def _anchor_match_ratio(anchor: Set[str], text: str) -> float:
 def _candidate_anchor_match(candidate: "RetrievalCandidate", anchors: Sequence[Set[str]]) -> bool:
     if not anchors:
         return False
-    target = f"{candidate.source} {candidate.base_uri}"
-    return any(_anchor_match_ratio(anchor, target) >= 0.6 for anchor in anchors)
+    target = f"{candidate.source} {candidate.base_uri} {candidate.abstract} {candidate.prompt_text}"
+    return any(_anchor_match_ratio(anchor, target) >= 0.45 for anchor in anchors)
 
 
 def _split_units(text: str) -> List[str]:
@@ -269,6 +318,51 @@ class RetrievalPacker:
             )
         return prepared
 
+    def rank_for_answer(
+        self,
+        candidates: Sequence[RetrievalCandidate],
+        *,
+        query: str,
+        question_category: Optional[str] = None,
+    ) -> List[RetrievalCandidate]:
+        """Order selected evidence before answer generation."""
+        query_words = _content_words(query)
+        query_numbers = _numbers(query)
+        query_entities = _entities(query)
+        query_type = self.classify_query(query, question_category)
+        needs_calculation = bool(_CALCULATION_RE.search(str(query or "")))
+        needs_comparison = bool(_COMPARISON_RE.search(str(query or "")))
+
+        def utility(candidate: RetrievalCandidate) -> float:
+            candidate_words = _content_words(candidate.prompt_text)
+            lexical = (
+                len(query_words & candidate_words) / len(query_words)
+                if query_words else 0.0
+            )
+            numeric = 0.0
+            if query_numbers:
+                direct = len(query_numbers & candidate.number_set) / len(query_numbers)
+                ranged = _range_hits(query, candidate.prompt_text) / len(query_numbers)
+                numeric = max(direct, min(1.0, ranged))
+            entity = (
+                len(query_entities & candidate.entity_set) / len(query_entities)
+                if query_entities else 0.0
+            )
+            signal = 0.0
+            if query_type == "temporal" and candidate.has_date_signal:
+                signal += 0.08
+            if (needs_calculation or needs_comparison) and candidate.number_set:
+                signal += 0.06
+            return (
+                0.55 * candidate.score
+                + 0.30 * lexical
+                + 0.18 * numeric
+                + 0.12 * entity
+                + signal
+            )
+
+        return sorted(candidates, key=utility, reverse=True)
+
     def _prompt_excerpt(self, content: str, *, query: str, max_chars: int) -> str:
         """Keep the most query-relevant units when a resource is too long.
 
@@ -296,7 +390,12 @@ class RetrievalPacker:
             if query_entities:
                 score += 2.5 * len(query_entities & entities) / len(query_entities)
             if query_numbers:
-                score += 2.5 * len(query_numbers & numbers) / len(query_numbers)
+                direct_hits = len(query_numbers & numbers)
+                range_hits = _range_hits(query, unit)
+                score += 2.5 * min(
+                    1.0,
+                    (direct_hits + range_hits) / len(query_numbers),
+                )
             if _TEMPORAL_RE.search(query) and re.search(r"\b(?:19|20)\d{2}\b|\b\d{1,2}[/-]\d{1,2}\b", unit):
                 score += 0.35
             if _CALCULATION_RE.search(query) and len(numbers) >= 2:
@@ -431,8 +530,11 @@ class RetrievalPacker:
         """
         query_type = self.classify_query(query, question_category)
         query_tokens = _token_set(query)
+        query_anchors = _query_anchors(query)
         leaves = [candidate for candidate in ordered if candidate.level >= 2]
         summaries = [candidate for candidate in ordered if candidate.level < 2]
+        if query_anchors and query_type != "multi_hop" and summaries and not leaves:
+            summary_slots = min(1, topk)
 
         if query_type == "interpretive":
             summary_slots = min(1, max(0, summary_limit if summary_limit > 0 else 1))
@@ -549,12 +651,15 @@ class RetrievalPacker:
             summary_slots = 0
 
         leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        summaries = [candidate for candidate in ordered if candidate.level < 2]
         anchored_ordered = [
             candidate for candidate in ordered if _candidate_anchor_match(candidate, query_anchors)
         ]
         anchored_leaves = [
             candidate for candidate in leaves if _candidate_anchor_match(candidate, query_anchors)
         ]
+        if query_anchors and summaries and not anchored_ordered and not anchored_leaves:
+            summary_slots = max(summary_slots, 1)
         if (
             query_anchors
             and query_type != "multi_hop"
@@ -563,7 +668,7 @@ class RetrievalPacker:
             summary_slots = min(1, topk)
         anchor_pool = leaves if leaves and query_type != "interpretive" else list(ordered)
         if query_anchors and query_type != "multi_hop":
-            anchor_pool = anchored_leaves or anchored_ordered or anchor_pool
+            anchor_pool = anchored_leaves or anchored_ordered or summaries or anchor_pool
         anchor = max(anchor_pool, key=lambda item: item.score)
         anchored_sources = {
             candidate.source for candidate in anchored_ordered
@@ -613,7 +718,9 @@ class RetrievalPacker:
             if query_words:
                 gain += 1.6 * len((query_words & candidate_words) - covered_words) / len(query_words)
             if query_numbers:
-                gain += 1.5 * len((query_numbers & candidate_numbers) - covered_numbers) / len(query_numbers)
+                direct_gain = len((query_numbers & candidate_numbers) - covered_numbers) / len(query_numbers)
+                range_gain = _range_hits(query, candidate.prompt_text) / len(query_numbers)
+                gain += 1.5 * max(direct_gain, min(1.0, range_gain))
             if query_entities:
                 gain += 1.5 * len((query_entities & candidate_entities) - covered_entities) / len(query_entities)
             if needs_calculation:
