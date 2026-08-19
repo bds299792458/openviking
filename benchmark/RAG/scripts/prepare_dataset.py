@@ -32,9 +32,9 @@ def prepare_dataset(
     print("\n" + "=" * 80)
     print(f"Preparing dataset: {dataset_name}")
     print("=" * 80)
-    
+
     success = True
-    
+
     # Step 1: Download
     if not skip_download:
         print("\n[Step 1/2] Downloading dataset...")
@@ -49,16 +49,16 @@ def prepare_dataset(
             success = False
     else:
         print("\n[Step 1/2] Skipping download (--skip-download)")
-    
+
     # Step 2: Sample
     if not skip_sampling and success:
         print("\n[Step 2/2] Sampling dataset...")
         input_dir = download_dir / dataset_name
         dataset_output_dir = output_dir / dataset_name
-        
+
         actual_sample_size = None if use_full else sample_size
         actual_num_docs = None if use_full else num_docs
-        
+
         sample_success = sample_dataset(
             dataset_name,
             input_dir,
@@ -73,7 +73,7 @@ def prepare_dataset(
             success = False
     elif skip_sampling:
         print("\n[Step 2/2] Skipping sampling (--skip-sampling)")
-    
+
     return success
 
 
@@ -85,21 +85,21 @@ def main():
 Examples:
   # Prepare all datasets with default settings
   python prepare_dataset.py
-  
+
   # Prepare only Locomo dataset with 50 samples
   python prepare_dataset.py --dataset Locomo --sample-size 50
-  
+
   # Prepare all datasets using full data (no sampling)
   python prepare_dataset.py --full
-  
+
   # Skip download, only sample existing datasets
   python prepare_dataset.py --skip-download
-  
+
   # Skip sampling, only download datasets
   python prepare_dataset.py --skip-sampling
         """
     )
-    
+
     # Dataset selection
     parser.add_argument(
         "--dataset", "-d",
@@ -108,7 +108,7 @@ Examples:
         default="all",
         help="Dataset to prepare (default: all)"
     )
-    
+
     # Directories
     parser.add_argument(
         "--download-dir",
@@ -122,7 +122,7 @@ Examples:
         default=Path(__file__).parent.parent / "datasets",
         help="Directory for final prepared datasets (default: datasets/)"
     )
-    
+
     # Sampling options
     parser.add_argument(
         "--sample-size", "-n",
@@ -154,7 +154,7 @@ Examples:
         default="random",
         help="Sampling mode: 'random' (default) for random sampling, 'stratified' for stratified sampling by category"
     )
-    
+
     # Skip options
     parser.add_argument(
         "--skip-download",
@@ -166,39 +166,39 @@ Examples:
         action="store_true",
         help="Skip sampling step"
     )
-    
+
     # Force options
     parser.add_argument(
         "--force-download", "-f",
         action="store_true",
         help="Force re-download even if dataset exists"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Validate dataset choices
     available_datasets = set(DOWNLOAD_SOURCES.keys()) & set(DATASET_SAMPLERS.keys())
     if args.dataset != "all" and args.dataset not in available_datasets:
         print(f"Error: Dataset '{args.dataset}' not available")
         print(f"Available datasets: {', '.join(sorted(available_datasets))}")
         return 1
-    
+
     # Handle --full flag - use full dataset, no sampling
     if args.full:
         args.sample_size = None
         args.num_docs = None
-    
+
     # Resolve paths
     download_dir = args.download_dir.resolve()
     output_dir = args.output_dir.resolve()
-    
+
     # Determine datasets to process
     datasets = (
-        sorted(available_datasets) 
-        if args.dataset == "all" 
+        sorted(available_datasets)
+        if args.dataset == "all"
         else [args.dataset]
     )
-    
+
     # Print configuration
     print("=" * 80)
     print("RAG Benchmark - Unified Dataset Preparation")
@@ -214,7 +214,7 @@ Examples:
     print(f"Skip sampling: {args.skip_sampling}")
     print(f"Force download: {args.force_download}")
     print("=" * 80)
-    
+
     # Prepare datasets
     success_count = 0
     for dataset in datasets:
@@ -232,13 +232,13 @@ Examples:
             args.sample_mode
         ):
             success_count += 1
-    
+
     # Final summary
     print("\n" + "=" * 80)
     print("Preparation Complete")
     print("=" * 80)
     print(f"Success: {success_count}/{len(datasets)} datasets")
-    
+
     if success_count == len(datasets):
         print("\n✅ All datasets prepared successfully!")
         print(f"\nPrepared datasets are in: {output_dir}")

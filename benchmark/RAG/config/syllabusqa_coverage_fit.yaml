@@ -1,28 +1,24 @@
 project_name: "RAG_Benchmark"
-
-# ===========Modify Configuration================
-dataset_name: "Locomo" 
+dataset_name: "SyllabusQA"
 
 adapter:
-  module: "src.adapters.locomo_adapter"  
-  class_name: "LocomoAdapter"     
+  module: "src.adapters.syllabusqa_adapter"
+  class_name: "SyllabusQAAdapter"
 
 execution:
-  retrieval_policy: official_score_only
+  retrieval_policy: unified_coverage_fit
   max_workers: 8
   ingest_workers: 8
-  max_queries: 20
+  max_queries: null
   skip_ingestion: false
   ingest_mode: "directory"
-  retrieval_instruction: ""  
-# ==================================  
+  retrieval_instruction: ""
 
 paths:
-  dataset_path: "datasets/{dataset_name}/locomo10.json"
+  dataset_path: "datasets/{dataset_name}"
   doc_output_dir: "ov_storage/{dataset_name}/{dataset_name}_processed_docs"
   output_dir: "Output/{dataset_name}/experiment_test_top_{retrieval_topk}"
   log_file: "Output/{dataset_name}/experiment_test_top_{retrieval_topk}/benchmark.log"
-
 
 llm:
   model: "doubao-seed-2-0-pro-260215"

@@ -1,0 +1,1154 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+
+_TOKEN_RE = re.compile(r"\w+")
+_NUMBER_RE = re.compile(r"\b(?:\d+(?:[.,]\d+)*|\d+(?:\.\d+)?%|(?:19|20)\d{2})\b")
+_RANGE_RE = re.compile(
+    r"(?<!\w)(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)(?:\s*%)?"
+)
+_ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,4}\b")
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "based",
+    "be",
+    "between",
+    "by",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "has",
+    "have",
+    "how",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "paper",
+    "question",
+    "that",
+    "the",
+    "their",
+    "there",
+    "this",
+    "to",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+}
+_LEVEL_SUFFIXES = ("/.abstract.md", "/.overview.md")
+_TEMPORAL_RE = re.compile(
+    r"\b(when|what date|what day|what month|what year|how long|before|after|"
+    r"earlier|later|first|last|recent|recently|ago|then|timeline|date|year)\b",
+    re.IGNORECASE,
+)
+_INTERPRETIVE_RE = re.compile(
+    r"\b(why|meaning|significance|significant|symboli[sz]|imply|implied|"
+    r"overall|summari[sz]|describe|theme|purpose)\b",
+    re.IGNORECASE,
+)
+_MULTI_HOP_RE = re.compile(
+    r"\b(between|relationship|related|connection|connect|both|each|"
+    r"which .* and .*|who .* (work|know|meet)|how did .* lead|what .* after)\b",
+    re.IGNORECASE,
+)
+_CALCULATION_RE = re.compile(
+    r"\b(calculate|calculation|computed?|ratio|rate|percent|percentage|"
+    r"margin|return on|per share|average|difference|growth|increase|"
+    r"decrease|turnover|how much|what was the amount)\b",
+    re.IGNORECASE,
+)
+_COMPARISON_RE = re.compile(
+    r"\b(compare|comparison|versus|vs\.?|between|relative to|higher|lower|"
+    r"more than|less than|difference between|each|both)\b",
+    re.IGNORECASE,
+)
+_LIST_RE = re.compile(
+    r"\b(list|which ones|what are the|name the|all of|multiple|each of)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_uri(uri: str) -> str:
+    value = str(uri or "").rstrip("/")
+    for suffix in _LEVEL_SUFFIXES:
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _source_key(uri: str) -> str:
+    normalized = _normalize_uri(uri)
+    if not normalized:
+        return normalized
+    head, sep, tail = normalized.rpartition("/")
+    if not sep:
+        return normalized
+    if tail.lower().endswith(".md"):
+        return head or normalized
+    return normalized
+
+
+def _token_set(text: str) -> Set[str]:
+    return set(_TOKEN_RE.findall(str(text or "").lower()))
+
+
+def _content_words(text: str) -> Set[str]:
+    return {
+        token
+        for token in _TOKEN_RE.findall(str(text or "").lower())
+        if len(token) > 2 and token not in _STOPWORDS
+    }
+
+
+def _numbers(text: str) -> Set[str]:
+    return {match.group(0).replace(",", "").lower() for match in _NUMBER_RE.finditer(str(text or ""))}
+
+
+def _number_values(text: str) -> Set[float]:
+    values: Set[float] = set()
+    for match in _NUMBER_RE.finditer(str(text or "")):
+        raw = match.group(0).replace(",", "").replace("%", "")
+        try:
+            values.add(float(raw))
+        except ValueError:
+            continue
+    return values
+
+
+def _range_hits(query: str, candidate: str) -> int:
+    query_values = _number_values(query)
+    if not query_values:
+        return 0
+    ranges = []
+    for match in _RANGE_RE.finditer(str(candidate or "")):
+        try:
+            left = float(match.group(1).replace(",", ""))
+            right = float(match.group(2).replace(",", ""))
+        except ValueError:
+            continue
+        ranges.append((min(left, right), max(left, right)))
+    return sum(
+        any(left <= value <= right for left, right in ranges)
+        for value in query_values
+    )
+
+
+def _entities(text: str) -> Set[str]:
+    values = set()
+    for match in _ENTITY_RE.finditer(str(text or "")):
+        value = re.sub(r"\s+", " ", match.group(0)).strip().lower()
+        if value and value not in _STOPWORDS:
+            values.add(value)
+    return values
+
+
+def _normalized_anchor_tokens(text: str) -> Set[str]:
+    return {
+        token
+        for token in _TOKEN_RE.findall(str(text or "").lower())
+        if len(token) > 1 and token not in _STOPWORDS
+    }
+
+
+def _query_anchors(query: str) -> List[Set[str]]:
+    """Extract explicit object/document anchors from the question text."""
+    text = str(query or "")
+    anchors: List[Set[str]] = []
+    seen: Set[Tuple[str, ...]] = set()
+    quoted_spans = re.findall(r'"([^"]{3,})"|\'([^\']{3,})\'', text)
+    for double_quoted, single_quoted in quoted_spans:
+        tokens = _normalized_anchor_tokens(double_quoted or single_quoted)
+        if len(tokens) < 2:
+            continue
+        key = tuple(sorted(tokens))
+        if key not in seen:
+            anchors.append(tokens)
+            seen.add(key)
+
+    # Questions in FinanceBench and similar datasets often mention the target
+    # company or document only as a normal capitalized phrase rather than a
+    # quoted title. Promote those named entities into anchors too, while
+    # keeping a compact concatenated form so "American Express" can match
+    # "AMERICANEXPRESS" style resource paths.
+    for entity in _entities(text):
+        entity_tokens = _normalized_anchor_tokens(entity)
+        compact = re.sub(r"[^a-z0-9]+", "", entity.lower())
+        if compact:
+            entity_tokens.add(compact)
+        if len(entity_tokens) < 1:
+            continue
+        key = tuple(sorted(entity_tokens))
+        if key not in seen:
+            anchors.append(entity_tokens)
+            seen.add(key)
+    return anchors
+
+
+def _anchor_match_ratio(anchor: Set[str], text: str) -> float:
+    if not anchor:
+        return 0.0
+    tokens = _normalized_anchor_tokens(text.replace("_", " ").replace("-", " "))
+    if not tokens:
+        return 0.0
+    return len(anchor & tokens) / len(anchor)
+
+
+def _candidate_anchor_match(candidate: "RetrievalCandidate", anchors: Sequence[Set[str]]) -> bool:
+    if not anchors:
+        return False
+    target = f"{candidate.source} {candidate.base_uri} {candidate.abstract} {candidate.prompt_text}"
+    return any(_anchor_match_ratio(anchor, target) >= 0.45 for anchor in anchors)
+
+
+def _split_units(text: str) -> List[str]:
+    """Split a block into stable, human-readable units for prompt packing."""
+    raw_units = re.split(r"\n\s*\n+|\n(?=#{1,6}\s)|(?<=[.!?])\s+(?=[A-Z])", str(text or ""))
+    return [re.sub(r"\s+", " ", unit).strip() for unit in raw_units if unit.strip()]
+
+
+def _jaccard(left: Set[str], right: Set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+@dataclass
+class RetrievalCandidate:
+    uri: str
+    score: float
+    level: int
+    content: str
+    abstract: str = ""
+    metadata: Optional[Dict[str, Any]] = None
+    prompt_text: str = ""
+    prompt_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.prompt_text:
+            self.prompt_text = self.content
+        self.metadata = dict(self.metadata or {})
+
+    @property
+    def base_uri(self) -> str:
+        return _normalize_uri(self.uri)
+
+    @property
+    def source(self) -> str:
+        return _source_key(self.uri)
+
+    @property
+    def token_set(self) -> Set[str]:
+        return _token_set(self.prompt_text)
+
+    @property
+    def result(self) -> Dict[str, Any]:
+        return dict(self.metadata.get("result", {}))
+
+    @property
+    def has_date_signal(self) -> bool:
+        text = f"{self.prompt_text} {self.abstract}"
+        return bool(re.search(r"\b(?:19|20)\d{2}\b|\b\d{1,2}[/-]\d{1,2}\b", text))
+
+    @property
+    def has_relation_signal(self) -> bool:
+        result = self.result
+        return bool(result.get("relations"))
+
+    @property
+    def number_set(self) -> Set[str]:
+        return _numbers(self.prompt_text)
+
+    @property
+    def entity_set(self) -> Set[str]:
+        return _entities(self.prompt_text)
+
+
+class RetrievalPacker:
+    def __init__(self, token_counter=None):
+        self.token_counter = token_counter or (lambda text: len(_TOKEN_RE.findall(str(text or ""))))
+
+    def prepare_candidates(
+        self,
+        raw_results: Sequence[Dict[str, Any]],
+        contents: Sequence[str],
+        *,
+        max_chars_per_block: int = 8000,
+        query: str = "",
+    ) -> List[RetrievalCandidate]:
+        prepared: List[RetrievalCandidate] = []
+        for result, content in zip(raw_results, contents):
+            prompt_text = self._prompt_excerpt(
+                str(content or ""),
+                query=query,
+                max_chars=max_chars_per_block,
+            )
+            prepared.append(
+                RetrievalCandidate(
+                    uri=str(result.get("uri", "")),
+                    score=float(result.get("score", 0.0) or 0.0),
+                    level=int(result.get("level", 2) or 2),
+                    content=str(content or ""),
+                    abstract=str(result.get("abstract", "") or result.get("overview", "") or ""),
+                    metadata={"result": dict(result)},
+                    prompt_text=prompt_text,
+                    prompt_tokens=self.token_counter(prompt_text),
+                )
+            )
+        return prepared
+
+    def rank_for_answer(
+        self,
+        candidates: Sequence[RetrievalCandidate],
+        *,
+        query: str,
+        question_category: Optional[str] = None,
+    ) -> List[RetrievalCandidate]:
+        """Order selected evidence before answer generation."""
+        query_words = _content_words(query)
+        query_numbers = _numbers(query)
+        query_entities = _entities(query)
+        query_type = self.classify_query(query, question_category)
+        needs_calculation = bool(_CALCULATION_RE.search(str(query or "")))
+        needs_comparison = bool(_COMPARISON_RE.search(str(query or "")))
+
+        def utility(candidate: RetrievalCandidate) -> float:
+            candidate_words = _content_words(candidate.prompt_text)
+            lexical = (
+                len(query_words & candidate_words) / len(query_words)
+                if query_words else 0.0
+            )
+            numeric = 0.0
+            if query_numbers:
+                direct = len(query_numbers & candidate.number_set) / len(query_numbers)
+                ranged = _range_hits(query, candidate.prompt_text) / len(query_numbers)
+                numeric = max(direct, min(1.0, ranged))
+            entity = (
+                len(query_entities & candidate.entity_set) / len(query_entities)
+                if query_entities else 0.0
+            )
+            signal = 0.0
+            if query_type == "temporal" and candidate.has_date_signal:
+                signal += 0.08
+            if (needs_calculation or needs_comparison) and candidate.number_set:
+                signal += 0.06
+            return (
+                0.55 * candidate.score
+                + 0.30 * lexical
+                + 0.18 * numeric
+                + 0.12 * entity
+                + signal
+            )
+
+        return sorted(candidates, key=utility, reverse=True)
+
+    def _prompt_excerpt(self, content: str, *, query: str, max_chars: int) -> str:
+        """Keep the most query-relevant units when a resource is too long.
+
+        Retrieval recall still uses the complete resource content. This method
+        only controls the text sent to the generator, so a long resource cannot
+        hide its relevant middle or ending behind a fixed prefix cut.
+        """
+        if max_chars <= 0 or len(content) <= max_chars:
+            return content[:max_chars] if max_chars > 0 else content
+
+        query_words = _content_words(query)
+        query_entities = _entities(query)
+        query_numbers = _numbers(query)
+        units = _split_units(content)
+        if not units:
+            return content[:max_chars]
+
+        def unit_score(unit: str) -> float:
+            words = _content_words(unit)
+            entities = _entities(unit)
+            numbers = _numbers(unit)
+            score = 0.0
+            if query_words:
+                score += 2.0 * len(query_words & words) / len(query_words)
+            if query_entities:
+                score += 2.5 * len(query_entities & entities) / len(query_entities)
+            if query_numbers:
+                direct_hits = len(query_numbers & numbers)
+                range_hits = _range_hits(query, unit)
+                score += 2.5 * min(
+                    1.0,
+                    (direct_hits + range_hits) / len(query_numbers),
+                )
+            if _TEMPORAL_RE.search(query) and re.search(r"\b(?:19|20)\d{2}\b|\b\d{1,2}[/-]\d{1,2}\b", unit):
+                score += 0.35
+            if _CALCULATION_RE.search(query) and len(numbers) >= 2:
+                score += 0.25
+            return score
+
+        ranked_indexes = sorted(range(len(units)), key=lambda index: unit_score(units[index]), reverse=True)
+        selected_indexes: Set[int] = set()
+        used = 0
+        for index in ranked_indexes:
+            # Always reserve the highest-scoring unit first. Adjacent context
+            # is useful only after the evidence anchor fits the budget.
+            neighbors = [index, index - 1, index + 1]
+            for neighbor in neighbors:
+                if neighbor < 0 or neighbor >= len(units) or neighbor in selected_indexes:
+                    continue
+                addition = units[neighbor] if not selected_indexes else f"\n\n{units[neighbor]}"
+                if used + len(addition) > max_chars:
+                    continue
+                selected_indexes.add(neighbor)
+                used += len(addition)
+            if used >= max_chars:
+                break
+
+        if not selected_indexes:
+            return content[:max_chars]
+        return "\n\n".join(units[index] for index in sorted(selected_indexes))[:max_chars]
+
+    def select(
+        self,
+        candidates: Sequence[RetrievalCandidate],
+        *,
+        topk: int,
+        strategy: str = "score_only",
+        query: str = "",
+        question_category: Optional[str] = None,
+        token_budget: Optional[int] = None,
+        diversity_lambda: float = 0.35,
+        source_penalty: float = 0.12,
+        summary_limit: int = 0,
+        min_score_ratio: float = 0.92,
+        max_per_source: int = 2,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        ordered = sorted(candidates, key=lambda item: item.score, reverse=True)
+        if strategy == "score_only":
+            selected = ordered[:topk]
+            return selected, self._stats(strategy, ordered, selected, token_budget, dropped={})
+        if strategy == "token_cap":
+            return self._token_cap(ordered, topk=topk, token_budget=token_budget)
+        if strategy == "evidence_packing":
+            return self._evidence_packing(
+                ordered,
+                topk=topk,
+                token_budget=token_budget,
+                diversity_lambda=diversity_lambda,
+                source_penalty=source_penalty,
+            )
+        if strategy == "hierarchy_aware":
+            return self._hierarchy_aware(
+                ordered,
+                topk=topk,
+                token_budget=token_budget,
+                summary_limit=summary_limit,
+            )
+        if strategy == "query_aware":
+            return self._query_aware(
+                ordered,
+                query=query,
+                question_category=question_category,
+                topk=topk,
+                token_budget=token_budget,
+                summary_limit=summary_limit,
+            )
+        if strategy == "evidence_fit":
+            return self._evidence_fit(
+                ordered,
+                query=query,
+                question_category=question_category,
+                topk=topk,
+                token_budget=token_budget,
+                summary_limit=summary_limit,
+                min_score_ratio=min_score_ratio,
+                max_per_source=max_per_source,
+            )
+        if strategy == "coverage_fit":
+            return self._coverage_fit(
+                ordered,
+                query=query,
+                question_category=question_category,
+                topk=topk,
+                token_budget=token_budget,
+                summary_limit=summary_limit,
+            )
+        raise ValueError(f"Unsupported retrieval packing strategy: {strategy}")
+
+    @staticmethod
+    def classify_query(query: str, question_category: Optional[str] = None) -> str:
+        """Classify evidence needs without another model call.
+
+        The profile is inferred from the question text so the same policy can
+        be used by every adapter. ``question_category`` remains in the
+        signature for adapter compatibility but is intentionally not used as a
+        dataset-specific routing signal. The labels describe selection needs,
+        not answer semantics.
+        """
+        text = str(query or "")
+        if _TEMPORAL_RE.search(text):
+            return "temporal"
+        if _MULTI_HOP_RE.search(text):
+            return "multi_hop"
+        if _INTERPRETIVE_RE.search(text):
+            return "interpretive"
+        return "factual"
+
+    def _query_aware(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        query: str,
+        question_category: Optional[str],
+        topk: int,
+        token_budget: Optional[int],
+        summary_limit: int,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        """Select evidence according to the question's evidence shape.
+
+        Vector score remains the primary signal. Lexical coverage is a small
+        tie-breaker for exact names/dates, while query type controls whether
+        leaf detail, source diversity, or one navigation summary is useful.
+        This makes the policy auditable and avoids spending an LLM call merely
+        to classify a benchmark question.
+        """
+        query_type = self.classify_query(query, question_category)
+        query_tokens = _token_set(query)
+        query_anchors = _query_anchors(query)
+        leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        summaries = [candidate for candidate in ordered if candidate.level < 2]
+        if query_anchors and query_type != "multi_hop" and summaries and not leaves:
+            summary_slots = min(1, topk)
+
+        if query_type == "interpretive":
+            summary_slots = min(1, max(0, summary_limit if summary_limit > 0 else 1))
+        else:
+            summary_slots = min(0, max(0, summary_limit))
+
+        def lexical_coverage(candidate: RetrievalCandidate) -> float:
+            if not query_tokens:
+                return 0.0
+            return len(query_tokens & candidate.token_set) / len(query_tokens)
+
+        def base_utility(candidate: RetrievalCandidate) -> float:
+            utility = candidate.score + 0.08 * lexical_coverage(candidate)
+            if query_type == "temporal":
+                utility += 0.06 * int(candidate.has_date_signal)
+            elif query_type == "interpretive":
+                utility += 0.04 * int(candidate.level < 2)
+            elif query_type == "multi_hop":
+                utility += 0.03 * int(candidate.has_relation_signal)
+            return utility
+
+        ranked_leaves = sorted(leaves, key=base_utility, reverse=True)
+        ranked_summaries = sorted(summaries, key=base_utility, reverse=True)
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        seen_sources: Set[str] = set()
+        used_tokens = 0
+        budget = token_budget if token_budget and token_budget > 0 else None
+        dropped = {"duplicate_uri": 0, "token_budget": 0, "summary_reserve": 0}
+
+        def choose(pool: Sequence[RetrievalCandidate], allow_diversity: bool) -> None:
+            nonlocal used_tokens
+            remaining = list(pool)
+            while remaining and len(selected) < topk:
+                best_index = None
+                best_value = None
+                for index, candidate in enumerate(remaining):
+                    if candidate.base_uri in seen_uris:
+                        dropped["duplicate_uri"] += 1
+                        continue
+                    next_tokens = used_tokens + candidate.prompt_tokens
+                    if budget is not None and selected and next_tokens > budget:
+                        continue
+                    value = base_utility(candidate)
+                    if allow_diversity and candidate.source not in seen_sources:
+                        value += 0.05
+                    if best_value is None or value > best_value:
+                        best_index = index
+                        best_value = value
+                if best_index is None:
+                    dropped["token_budget"] += len(remaining)
+                    break
+                candidate = remaining.pop(best_index)
+                selected.append(candidate)
+                seen_uris.add(candidate.base_uri)
+                seen_sources.add(candidate.source)
+                used_tokens += candidate.prompt_tokens
+
+        if summary_slots:
+            choose(ranked_summaries[:summary_slots], allow_diversity=False)
+        # Multi-hop questions benefit from independent sources; other types
+        # primarily need the strongest exact leaf evidence.
+        choose(ranked_leaves, allow_diversity=query_type == "multi_hop")
+        if len(selected) < topk:
+            dropped["summary_reserve"] = len(ranked_summaries)
+            choose(ranked_summaries, allow_diversity=False)
+
+        stats = self._stats("query_aware", ordered, selected, budget, dropped=dropped)
+        stats.update(
+            {
+                "query_type": query_type,
+                "question_category": str(question_category or ""),
+                "summary_limit": summary_slots,
+                "selected_leaf_count": sum(item.level >= 2 for item in selected),
+                "selected_date_signal_count": sum(item.has_date_signal for item in selected),
+            }
+        )
+        return selected, stats
+
+    def _coverage_fit(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        query: str,
+        question_category: Optional[str],
+        topk: int,
+        token_budget: Optional[int],
+        summary_limit: int,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        """Keep a high-score anchor, then add complementary evidence.
+
+        The first candidate is deliberately anchored to vector similarity.
+        Later candidates are selected by marginal query coverage and novelty,
+        so a low-score block can survive when it contributes a missing number,
+        entity, date, or relation. Unlike a source-count cap, redundancy is
+        handled softly with token overlap; multiple blocks from one document
+        remain available for multi-step calculations.
+        """
+        if not ordered or topk <= 0:
+            return [], self._stats("coverage_fit", ordered, [], token_budget, dropped={})
+
+        query_type = self.classify_query(query, question_category)
+        query_words = _content_words(query)
+        query_numbers = _numbers(query)
+        query_entities = _entities(query)
+        query_lower = str(query or "").lower()
+        query_anchors = _query_anchors(query)
+        needs_calculation = bool(_CALCULATION_RE.search(query_lower))
+        needs_comparison = bool(_COMPARISON_RE.search(query_lower))
+        needs_list = bool(_LIST_RE.search(query_lower))
+        budget = token_budget if token_budget and token_budget > 0 else None
+        summary_slots = min(max(0, summary_limit), topk)
+        if query_type in {"factual", "temporal", "multi_hop"}:
+            summary_slots = 0
+
+        leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        summaries = [candidate for candidate in ordered if candidate.level < 2]
+        anchored_ordered = [
+            candidate for candidate in ordered if _candidate_anchor_match(candidate, query_anchors)
+        ]
+        anchored_leaves = [
+            candidate for candidate in leaves if _candidate_anchor_match(candidate, query_anchors)
+        ]
+        if query_anchors and summaries and not anchored_ordered and not anchored_leaves:
+            summary_slots = max(summary_slots, 1)
+        if (
+            query_anchors
+            and query_type != "multi_hop"
+            and any(candidate.level < 2 for candidate in anchored_ordered)
+        ):
+            summary_slots = min(1, topk)
+        anchor_pool = leaves if leaves and query_type != "interpretive" else list(ordered)
+        if query_anchors and query_type != "multi_hop":
+            anchor_pool = anchored_leaves or anchored_ordered or summaries or anchor_pool
+        anchor = max(anchor_pool, key=lambda item: item.score)
+        anchored_sources = {
+            candidate.source for candidate in anchored_ordered
+        } if query_anchors else set()
+
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        used_tokens = 0
+        summary_count = 0
+        dropped = {
+            "duplicate_uri": 0,
+            "token_budget": 0,
+            "summary_limit": 0,
+            "redundant_candidate": 0,
+        }
+
+        def add(candidate: RetrievalCandidate) -> bool:
+            nonlocal used_tokens, summary_count
+            if candidate.base_uri in seen_uris:
+                dropped["duplicate_uri"] += 1
+                return False
+            if candidate.level < 2 and summary_count >= summary_slots:
+                dropped["summary_limit"] += 1
+                return False
+            next_tokens = used_tokens + candidate.prompt_tokens
+            if budget is not None and selected and next_tokens > budget:
+                dropped["token_budget"] += 1
+                return False
+            selected.append(candidate)
+            seen_uris.add(candidate.base_uri)
+            used_tokens = next_tokens
+            if candidate.level < 2:
+                summary_count += 1
+            return True
+
+        add(anchor)
+        remaining = [candidate for candidate in ordered if candidate.base_uri != anchor.base_uri]
+
+        def coverage_gain(candidate: RetrievalCandidate) -> float:
+            gain = 0.0
+            candidate_words = _content_words(candidate.prompt_text)
+            candidate_numbers = candidate.number_set
+            candidate_entities = candidate.entity_set
+            covered_words = set().union(*(_content_words(item.prompt_text) for item in selected))
+            covered_numbers = set().union(*(item.number_set for item in selected))
+            covered_entities = set().union(*(item.entity_set for item in selected))
+            if query_words:
+                gain += 1.6 * len((query_words & candidate_words) - covered_words) / len(query_words)
+            if query_numbers:
+                direct_gain = len((query_numbers & candidate_numbers) - covered_numbers) / len(query_numbers)
+                range_gain = _range_hits(query, candidate.prompt_text) / len(query_numbers)
+                gain += 1.5 * max(direct_gain, min(1.0, range_gain))
+            if query_entities:
+                gain += 1.5 * len((query_entities & candidate_entities) - covered_entities) / len(query_entities)
+            if needs_calculation:
+                if len(candidate_numbers) >= 2:
+                    gain += 0.20
+                elif candidate_numbers:
+                    gain += 0.06
+            if needs_comparison and len(candidate_numbers) >= 2:
+                gain += 0.12
+            if needs_list and re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s+", candidate.prompt_text):
+                gain += 0.10
+            if query_type == "temporal" and candidate.has_date_signal:
+                gain += 0.15
+            if query_type == "multi_hop" and candidate.has_relation_signal:
+                gain += 0.10
+            return gain
+
+        while remaining and len(selected) < topk:
+            best = None
+            best_value = None
+            anchor_candidate_available = bool(
+                query_anchors
+                and query_type != "multi_hop"
+                and anchored_sources
+                and any(
+                    candidate.source in anchored_sources
+                    and candidate.level >= 2
+                    and candidate.base_uri not in seen_uris
+                    and (budget is None or not selected or used_tokens + candidate.prompt_tokens <= budget)
+                    for candidate in remaining
+                )
+            )
+            for candidate in remaining:
+                if candidate.level < 2 and summary_count >= summary_slots:
+                    continue
+                if budget is not None and selected and used_tokens + candidate.prompt_tokens > budget:
+                    continue
+                if anchor_candidate_available and candidate.source not in anchored_sources:
+                    continue
+                redundancy = max(
+                    (_jaccard(candidate.token_set, chosen.token_set) for chosen in selected),
+                    default=0.0,
+                )
+                gain = coverage_gain(candidate)
+                source_continuity = 0.05 if (
+                    (needs_calculation or needs_comparison)
+                    and selected
+                    and candidate.source == selected[-1].source
+                ) else 0.0
+                source_novelty = 0.04 if (
+                    not needs_calculation
+                    and not needs_comparison
+                    and not query_anchors
+                    and selected
+                    and candidate.source not in {item.source for item in selected}
+                ) else 0.0
+                source_grounding = 0.0
+                if query_anchors and query_type != "multi_hop":
+                    if candidate.source in anchored_sources:
+                        source_grounding += 0.18
+                    elif anchored_sources:
+                        source_grounding -= 0.22
+                cost_penalty = 0.04 * min(candidate.prompt_tokens / 1000.0, 2.0)
+                value = (
+                    0.70 * candidate.score
+                    + 0.30 * gain
+                    - 0.12 * redundancy
+                    - cost_penalty
+                    + source_continuity
+                    + source_novelty
+                    + source_grounding
+                )
+                if candidate.level < 2:
+                    value -= 0.08
+                if best_value is None or value > best_value:
+                    best = candidate
+                    best_value = value
+
+            if best is None:
+                dropped["token_budget"] += len(remaining)
+                break
+            redundancy = max(
+                (_jaccard(best.token_set, chosen.token_set) for chosen in selected),
+                default=0.0,
+            )
+            if redundancy >= 0.92 and coverage_gain(best) <= 0.0:
+                dropped["redundant_candidate"] += 1
+                remaining.remove(best)
+                continue
+            add(best)
+            remaining.remove(best)
+
+        selected = sorted(selected, key=lambda item: item.score, reverse=True)
+        stats = self._stats("coverage_fit", ordered, selected, budget, dropped=dropped)
+        stats.update(
+            {
+                "query_type": query_type,
+                "question_category": str(question_category or ""),
+                "summary_limit": summary_slots,
+                "selected_leaf_count": sum(item.level >= 2 for item in selected),
+                "selected_date_signal_count": sum(item.has_date_signal for item in selected),
+                "selected_number_overlap_count": sum(bool(query_numbers & item.number_set) for item in selected),
+                "selected_entity_overlap_count": sum(bool(query_entities & item.entity_set) for item in selected),
+                "needs_calculation": needs_calculation,
+                "needs_comparison": needs_comparison,
+                "needs_list": needs_list,
+                "query_anchor_count": len(query_anchors),
+                "anchored_source_count": len(anchored_sources),
+            }
+        )
+        return selected, stats
+
+    def _evidence_fit(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        query: str,
+        question_category: Optional[str],
+        topk: int,
+        token_budget: Optional[int],
+        summary_limit: int,
+        min_score_ratio: float,
+        max_per_source: int,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        """Rank evidence by answer fitness under one shared RAG policy.
+
+        This strategy keeps vector similarity as the gate, then uses cheap
+        deterministic signals to decide which candidates are safe to pass to
+        the generator. It favors leaf chunks with overlapping entities,
+        numbers, years, and content words, limits near-duplicates from the
+        same source, and only spends summary slots when the query is broad.
+        """
+        query_type = self.classify_query(query, question_category)
+        query_words = _content_words(query)
+        query_numbers = _numbers(query)
+        query_entities = _entities(query)
+        best_score = max((item.score for item in ordered), default=0.0)
+        min_score = best_score * min_score_ratio if best_score > 0 else None
+        budget = token_budget if token_budget and token_budget > 0 else None
+        max_source_count = max(1, max_per_source)
+        summary_slots = min(max(0, summary_limit), topk)
+        if query_type in {"factual", "temporal"}:
+            summary_slots = 0
+        elif query_type == "interpretive" and summary_limit <= 0:
+            summary_slots = min(1, topk)
+
+        dropped = {
+            "duplicate_uri": 0,
+            "token_budget": 0,
+            "low_score_gate": 0,
+            "source_cap": 0,
+            "summary_limit": 0,
+        }
+
+        def overlap_ratio(left: Set[str], right: Set[str]) -> float:
+            if not left:
+                return 0.0
+            return len(left & right) / len(left)
+
+        def evidence_score(candidate: RetrievalCandidate) -> float:
+            word_overlap = overlap_ratio(query_words, candidate.token_set)
+            number_overlap = overlap_ratio(query_numbers, candidate.number_set)
+            entity_overlap = overlap_ratio(query_entities, candidate.entity_set)
+            utility = candidate.score
+            utility += 0.10 * word_overlap
+            utility += 0.18 * entity_overlap
+            utility += 0.16 * number_overlap
+            if candidate.level >= 2:
+                utility += 0.04
+            else:
+                utility -= 0.10
+            if query_type == "temporal":
+                utility += 0.08 * int(candidate.has_date_signal)
+            elif query_type == "multi_hop":
+                utility += 0.05 * int(candidate.has_relation_signal)
+            elif query_type == "interpretive" and candidate.level < 2:
+                utility += 0.08
+            return utility
+
+        ranked = sorted(ordered, key=evidence_score, reverse=True)
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        used_tokens = 0
+        source_counts: Dict[str, int] = {}
+        selected_summary_count = 0
+
+        def can_add(candidate: RetrievalCandidate) -> bool:
+            if candidate.base_uri in seen_uris:
+                dropped["duplicate_uri"] += 1
+                return False
+            if min_score is not None and selected and candidate.score < min_score:
+                dropped["low_score_gate"] += 1
+                return False
+            if candidate.level < 2 and selected_summary_count >= summary_slots:
+                dropped["summary_limit"] += 1
+                return False
+            if source_counts.get(candidate.source, 0) >= max_source_count and len(source_counts) > 0:
+                dropped["source_cap"] += 1
+                return False
+            next_tokens = used_tokens + candidate.prompt_tokens
+            if budget is not None and selected and next_tokens > budget:
+                dropped["token_budget"] += 1
+                return False
+            return True
+
+        for candidate in ranked:
+            if len(selected) >= topk:
+                break
+            if not can_add(candidate):
+                continue
+            selected.append(candidate)
+            seen_uris.add(candidate.base_uri)
+            source_counts[candidate.source] = source_counts.get(candidate.source, 0) + 1
+            used_tokens += candidate.prompt_tokens
+            if candidate.level < 2:
+                selected_summary_count += 1
+
+        if len(selected) < topk:
+            for candidate in sorted(ordered, key=lambda item: item.score, reverse=True):
+                if len(selected) >= topk:
+                    break
+                if candidate.base_uri in seen_uris:
+                    continue
+                next_tokens = used_tokens + candidate.prompt_tokens
+                if budget is not None and selected and next_tokens > budget:
+                    continue
+                if candidate.level < 2 and selected_summary_count >= summary_slots and any(item.level >= 2 for item in ordered):
+                    continue
+                selected.append(candidate)
+                seen_uris.add(candidate.base_uri)
+                source_counts[candidate.source] = source_counts.get(candidate.source, 0) + 1
+                used_tokens += candidate.prompt_tokens
+                if candidate.level < 2:
+                    selected_summary_count += 1
+
+        stats = self._stats("evidence_fit", ordered, selected, budget, dropped=dropped)
+        stats.update(
+            {
+                "query_type": query_type,
+                "question_category": str(question_category or ""),
+                "min_score_ratio": min_score_ratio,
+                "max_per_source": max_source_count,
+                "summary_limit": summary_slots,
+                "selected_leaf_count": sum(item.level >= 2 for item in selected),
+                "selected_date_signal_count": sum(item.has_date_signal for item in selected),
+                "selected_number_overlap_count": sum(bool(query_numbers & item.number_set) for item in selected),
+                "selected_entity_overlap_count": sum(bool(query_entities & item.entity_set) for item in selected),
+                "source_counts": source_counts,
+            }
+        )
+        return selected, stats
+
+    def _hierarchy_aware(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        topk: int,
+        token_budget: Optional[int],
+        summary_limit: int,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        """Prefer L2 leaves over L0/L1 navigation summaries.
+
+        OpenViking indexes both raw leaf content (L2) and generated directory
+        sidecars (L0 abstract, L1 overview). For fact-focused RAG evaluation,
+        a broad sidecar can outrank the session containing the exact date or
+        event. Treat summaries as fallback/navigation context instead of peer
+        evidence. A positive ``summary_limit`` explicitly opts into summary
+        slots; otherwise summaries are only used when the candidate pool has
+        too few L2 leaves.
+        """
+        leaves = [candidate for candidate in ordered if candidate.level >= 2]
+        summaries = [candidate for candidate in ordered if candidate.level < 2]
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        used_tokens = 0
+        dropped = {"duplicate_uri": 0, "token_budget": 0, "summary_reserve": 0}
+        budget = token_budget if token_budget and token_budget > 0 else None
+        max_summaries = max(0, summary_limit)
+
+        def add_from(pool: Sequence[RetrievalCandidate], limit: int) -> None:
+            nonlocal used_tokens
+            for candidate in pool:
+                if len(selected) >= limit:
+                    break
+                if candidate.base_uri in seen_uris:
+                    dropped["duplicate_uri"] += 1
+                    continue
+                next_tokens = used_tokens + candidate.prompt_tokens
+                if budget is not None and selected and next_tokens > budget:
+                    dropped["token_budget"] += 1
+                    continue
+                selected.append(candidate)
+                seen_uris.add(candidate.base_uri)
+                used_tokens = next_tokens
+
+        # Reserve the requested summary slots only when explicitly configured.
+        leaf_target = max(0, topk - min(max_summaries, topk))
+        add_from(leaves, leaf_target)
+
+        if max_summaries:
+            add_from(summaries, topk)
+
+        # Fill all remaining slots with leaves first. This also handles sparse
+        # candidate pools where no summary slots were requested.
+        add_from(leaves, topk)
+        if len(selected) < topk:
+            dropped["summary_reserve"] = len(summaries)
+            add_from(summaries, topk)
+
+        stats = self._stats("hierarchy_aware", ordered, selected, budget, dropped=dropped)
+        stats["summary_limit"] = max_summaries
+        stats["selected_levels"] = [item.level for item in selected]
+        stats["selected_leaf_count"] = sum(item.level >= 2 for item in selected)
+        return selected, stats
+
+    def _token_cap(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        topk: int,
+        token_budget: Optional[int],
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        used_tokens = 0
+        dropped = {"duplicate_uri": 0, "token_budget": 0}
+        budget = token_budget if token_budget and token_budget > 0 else None
+        for candidate in ordered:
+            if len(selected) >= topk:
+                break
+            if candidate.base_uri in seen_uris:
+                dropped["duplicate_uri"] += 1
+                continue
+            next_tokens = used_tokens + candidate.prompt_tokens
+            if budget is not None and selected and next_tokens > budget:
+                dropped["token_budget"] += 1
+                continue
+            selected.append(candidate)
+            seen_uris.add(candidate.base_uri)
+            used_tokens = next_tokens
+        return selected, self._stats("token_cap", ordered, selected, budget, dropped=dropped)
+
+    def _evidence_packing(
+        self,
+        ordered: Sequence[RetrievalCandidate],
+        *,
+        topk: int,
+        token_budget: Optional[int],
+        diversity_lambda: float,
+        source_penalty: float,
+    ) -> Tuple[List[RetrievalCandidate], Dict[str, Any]]:
+        remaining = list(ordered)
+        selected: List[RetrievalCandidate] = []
+        seen_uris: Set[str] = set()
+        used_tokens = 0
+        source_counts: Dict[str, int] = {}
+        dropped = {"duplicate_uri": 0, "token_budget": 0}
+        budget = token_budget if token_budget and token_budget > 0 else None
+
+        while remaining and len(selected) < topk:
+            best_index = None
+            best_value = None
+            for idx, candidate in enumerate(remaining):
+                if candidate.base_uri in seen_uris:
+                    continue
+                next_tokens = used_tokens + candidate.prompt_tokens
+                if budget is not None and selected and next_tokens > budget:
+                    continue
+                if not selected:
+                    utility = candidate.score
+                else:
+                    novelty = 1.0 - max(
+                        (_jaccard(candidate.token_set, chosen.token_set) for chosen in selected),
+                        default=0.0,
+                    )
+                    utility = (
+                        (1.0 - diversity_lambda) * candidate.score
+                        + diversity_lambda * novelty
+                        - source_penalty * source_counts.get(candidate.source, 0)
+                    )
+                if best_value is None or utility > best_value:
+                    best_index = idx
+                    best_value = utility
+
+            if best_index is None:
+                break
+
+            chosen = remaining.pop(best_index)
+            selected.append(chosen)
+            seen_uris.add(chosen.base_uri)
+            source_counts[chosen.source] = source_counts.get(chosen.source, 0) + 1
+            used_tokens += chosen.prompt_tokens
+
+            survivors: List[RetrievalCandidate] = []
+            for candidate in remaining:
+                if candidate.base_uri in seen_uris:
+                    dropped["duplicate_uri"] += 1
+                    continue
+                next_tokens = used_tokens + candidate.prompt_tokens
+                if budget is not None and len(selected) and next_tokens > budget:
+                    continue
+                survivors.append(candidate)
+            remaining = survivors
+
+        stats = self._stats("evidence_packing", ordered, selected, budget, dropped=dropped)
+        stats["source_counts"] = source_counts
+        stats["diversity_lambda"] = diversity_lambda
+        stats["source_penalty"] = source_penalty
+        return selected, stats
+
+    def _stats(
+        self,
+        strategy: str,
+        candidates: Sequence[RetrievalCandidate],
+        selected: Sequence[RetrievalCandidate],
+        token_budget: Optional[int],
+        *,
+        dropped: Dict[str, int],
+    ) -> Dict[str, Any]:
+        return {
+            "strategy": strategy,
+            "candidate_count": len(candidates),
+            "selected_count": len(selected),
+            "token_budget": token_budget,
+            "selected_tokens": sum(item.prompt_tokens for item in selected),
+            "selected_sources": len({item.source for item in selected}),
+            "selected_uris": [item.uri for item in selected],
+            "selected_scores": [item.score for item in selected],
+            "selected_levels": [item.level for item in selected],
+            "dropped": dropped,
+        }

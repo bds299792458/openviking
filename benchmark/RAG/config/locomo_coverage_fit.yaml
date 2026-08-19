@@ -1,0 +1,28 @@
+project_name: OpenViking_gpt54mini_rag_10pct_unified_clean_rerun
+dataset_name: Locomo
+adapter:
+  module: src.adapters.locomo_adapter
+  class_name: LocomoAdapter
+paths:
+  dataset_path: /home/shuaidong/hw/original_upstream_results/rag_10pct/datasets/Locomo/locomo10.json
+  doc_output_dir: /home/shuaidong/hw/original_upstream_results/rag_10pct_unified_rerun_20260813_clean/work/locomo/coverage_fit_processed_docs
+  output_dir: /home/shuaidong/hw/original_upstream_results/rag_10pct_unified_rerun_20260813_clean/runs/coverage_fit/locomo
+  log_file: /home/shuaidong/hw/original_upstream_results/rag_10pct_unified_rerun_20260813_clean/runs/coverage_fit/locomo/benchmark.log
+llm:
+  model: gpt-5.4-mini
+  temperature: 0
+  base_url: https://jizhiapi.site/v1
+  api_key_env_var: OPENAI_API_KEY
+execution:
+  retrieval_policy: unified_coverage_fit
+  max_workers: 1
+  ingest_workers: 1
+  max_queries: null
+  skip_ingestion: false
+  ingest_mode: per_file
+  retrieval_instruction: ''
+  openviking_url: http://127.0.0.1:1950
+  sdk_timeout_s: 900
+  ingest_wait_timeout_s: 3600
+  retrieve_max_retries: 3
+  retrieve_retry_base_delay_s: 2.0
