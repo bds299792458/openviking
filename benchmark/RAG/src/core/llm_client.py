@@ -1,8 +1,8 @@
 import time
 import random
 import re
+from openai import OpenAI
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
 
 
 TRANSIENT_ERROR_MARKERS = (
@@ -34,12 +34,21 @@ PERMANENT_ERROR_MARKERS = (
 
 class LLMClientWrapper:
     def __init__(self, config: dict, api_key: str):
-        self.llm = ChatOpenAI(
-            model=config['model'],
-            temperature=config['temperature'],
+        self.model = config['model']
+        self.temperature = config['temperature']
+        self.timeout = float(config.get('timeout', 180))
+        self.api_client = OpenAI(
             api_key=api_key,
             base_url=config['base_url'],
-            timeout=config.get('timeout', 180),
+            timeout=self.timeout,
+            max_retries=0,
+        )
+        self.llm = ChatOpenAI(
+            model=self.model,
+            temperature=self.temperature,
+            api_key=api_key,
+            base_url=config['base_url'],
+            timeout=self.timeout,
             max_retries=0,
         )
         self.retry_count = int(config.get('max_retries', 8))
@@ -80,8 +89,13 @@ class LLMClientWrapper:
         last_err = None
         for attempt in range(self.retry_count):
             try:
-                resp = self.llm.invoke([HumanMessage(content=prompt)])
-                return resp.content
+                resp = self.api_client.chat.completions.create(
+                    model=self.model,
+                    temperature=self.temperature,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=self.timeout,
+                )
+                return resp.choices[0].message.content or ""
             except Exception as e:
                 last_err = e
                 if attempt >= self.retry_count - 1 or not self._is_retryable_error(e):
