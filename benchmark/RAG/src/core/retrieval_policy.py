@@ -21,14 +21,12 @@ RETRIEVAL_POLICIES = {
         "context_token_budget": 8000,
         "max_context_chars_per_block": 8000,
         "summary_limit": 0,
-        'answer_candidate_selection': True,
-        "answer_candidate_conservative_topk": 5,
-        "answer_candidate_selector_max_chars": 9000,
-        'answer_final_refinement': True,
-        'answer_final_refinement_max_chars': 12000,
-        'answer_context_topk': 8,
-        'answer_missing_retry': True,
-        'answer_missing_retry_max_chars': 14000,
+        # Keep the optimization to retrieval and context packing. Extra LLM
+        # arbitration/refinement calls create tail latency and confound token
+        # accounting against the one-generation-call official baseline.
+        'answer_candidate_selection': False,
+        'answer_final_refinement': False,
+        'answer_missing_retry': False,
         'source_page_min_leaf_candidates': 2,
     },
 }
