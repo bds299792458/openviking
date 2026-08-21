@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 
@@ -29,6 +30,20 @@ def parse_run_dir_overrides(values: list[str] | None) -> dict[tuple[str, str], P
     return overrides
 
 
+def percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round(q * (len(ordered) - 1))))
+    return ordered[index]
+
+
+def average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def metrics_for(root: Path, variant: str, dataset: str, run_dir_overrides: dict[tuple[str, str], Path] | None = None) -> dict:
     run_dir = (run_dir_overrides or {}).get((variant, dataset), root / "runs" / variant / dataset)
     report = read_json(run_dir / "benchmark_metrics_report.json")
@@ -37,9 +52,34 @@ def metrics_for(root: Path, variant: str, dataset: str, run_dir_overrides: dict[
     insertion = report.get("Insertion Efficiency (Total Dataset)", {})
     query = report.get("Query Efficiency (Average Per Query)", {})
     perf = report.get("Performance Metrics", {})
+    generated_records = generated.get("results", [])
     records = details.get("results", [])
-    retrieval_times = [r.get("retrieval", {}).get("latency_sec") for r in generated.get("results", [])]
+    retrieval_times = [r.get("retrieval", {}).get("latency_sec") for r in generated_records]
     retrieval_times = [float(x) for x in retrieval_times if isinstance(x, (int, float))]
+    input_tokens = [
+        r.get("token_usage", {}).get("total_input_tokens")
+        for r in generated_records
+        if isinstance(r.get("token_usage", {}).get("total_input_tokens"), (int, float))
+    ]
+    output_tokens = [
+        r.get("token_usage", {}).get("llm_output_tokens")
+        for r in generated_records
+        if isinstance(r.get("token_usage", {}).get("llm_output_tokens"), (int, float))
+    ]
+    retrieved_counts = [
+        len(r.get("retrieval", {}).get("uris", []) or [])
+        for r in generated_records
+    ]
+    hit_scores = [
+        r.get("metrics", {}).get("Accuracy")
+        for r in records
+        if isinstance(r.get("metrics", {}).get("Accuracy"), (int, float))
+    ]
+    recall_scores = [
+        r.get("metrics", {}).get("Recall")
+        for r in records
+        if isinstance(r.get("metrics", {}).get("Recall"), (int, float))
+    ]
     return {
         "exists": bool(report),
         "run_dir": str(run_dir),
@@ -56,7 +96,16 @@ def metrics_for(root: Path, variant: str, dataset: str, run_dir_overrides: dict[
         "insertion_output_tokens": insertion.get("Total Output Tokens"),
         "insertion_embedding_tokens": insertion.get("Total Embedding Tokens"),
         "retrieval_time_min_s": min(retrieval_times) if retrieval_times else None,
+        "retrieval_time_p50_s": percentile(retrieval_times, 0.50),
+        "retrieval_time_p95_s": percentile(retrieval_times, 0.95),
         "retrieval_time_max_s": max(retrieval_times) if retrieval_times else None,
+        "input_tokens_total": sum(input_tokens) if input_tokens else None,
+        "output_tokens_total": sum(output_tokens) if output_tokens else None,
+        "retrieved_count_avg": average([float(x) for x in retrieved_counts]),
+        "zero_retrieval_queries": sum(1 for count in retrieved_counts if count == 0),
+        "nonzero_recall_queries": sum(1 for score in recall_scores if score > 0),
+        "hit_score_distribution": dict(sorted(Counter(hit_scores).items())),
+        "accuracy_4_queries": sum(1 for score in hit_scores if score == 4),
         "evaluated_records": len(records),
     }
 
@@ -112,6 +161,9 @@ def main() -> None:
                 "avg_output_tokens": diff(base.get("avg_output_tokens"), opt.get("avg_output_tokens")),
                 "insertion_time_s": diff(base.get("insertion_time_s"), opt.get("insertion_time_s")),
                 "insertion_embedding_tokens": diff(base.get("insertion_embedding_tokens"), opt.get("insertion_embedding_tokens")),
+                "input_tokens_total": diff(base.get("input_tokens_total"), opt.get("input_tokens_total")),
+                "output_tokens_total": diff(base.get("output_tokens_total"), opt.get("output_tokens_total")),
+                "zero_retrieval_queries": diff(base.get("zero_retrieval_queries"), opt.get("zero_retrieval_queries")),
             },
             "relative_delta_percent": {
                 "avg_retrieval_time_s": pct_delta(base.get("avg_retrieval_time_s"), opt.get("avg_retrieval_time_s")),
@@ -133,8 +185,8 @@ def main() -> None:
         "",
         f"Experiment root: `{args.root}`",
         "",
-        "| Dataset | Queries | Recall baseline -> optimized | F1 baseline -> optimized | Accuracy baseline -> optimized | Avg retrieval time baseline -> optimized | Avg input tokens baseline -> optimized | Avg output tokens baseline -> optimized | Insertion time baseline -> optimized |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Dataset | Queries | Recall baseline -> optimized | F1 baseline -> optimized | Accuracy baseline -> optimized | Avg retrieval time baseline -> optimized | p50/p95 optimized | Input tokens total baseline -> optimized | Output tokens total baseline -> optimized | Empty retrieval baseline -> optimized |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for dataset, base, opt, _comparison in rows:
         lines.append(
@@ -147,9 +199,10 @@ def main() -> None:
                     f"{fmt(base.get('f1'))} -> {fmt(opt.get('f1'))}",
                     f"{fmt(base.get('accuracy_norm'))} -> {fmt(opt.get('accuracy_norm'))}",
                     f"{fmt(base.get('avg_retrieval_time_s'))} -> {fmt(opt.get('avg_retrieval_time_s'))}",
-                    f"{fmt(base.get('avg_input_tokens'), 1)} -> {fmt(opt.get('avg_input_tokens'), 1)}",
-                    f"{fmt(base.get('avg_output_tokens'), 1)} -> {fmt(opt.get('avg_output_tokens'), 1)}",
-                    f"{fmt(base.get('insertion_time_s'), 2)} -> {fmt(opt.get('insertion_time_s'), 2)}",
+                    f"{fmt(opt.get('retrieval_time_p50_s'))}/{fmt(opt.get('retrieval_time_p95_s'))}",
+                    f"{fmt(base.get('input_tokens_total'), 0)} -> {fmt(opt.get('input_tokens_total'), 0)}",
+                    f"{fmt(base.get('output_tokens_total'), 0)} -> {fmt(opt.get('output_tokens_total'), 0)}",
+                    f"{fmt(base.get('zero_retrieval_queries'), 0)} -> {fmt(opt.get('zero_retrieval_queries'), 0)}",
                 ]
             )
             + " |"

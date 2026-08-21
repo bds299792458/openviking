@@ -77,17 +77,17 @@ Baseline 使用官方 OpenViking 仓库和官方 benchmark 路径，按数据集
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | LoCoMo 10% | baseline | 0.209s | 0.419s | 1.307s | 339,544 | 1,833 | 78/81 | 70/81 |
 | LoCoMo 10% | optimized | 0.226s | 0.479s | 0.711s | 360,344 | 1,119 | 78/81 | 70/81 |
-| FinanceBench 50% | baseline | 0.203s | 0.427s | 0.481s | 20,485 | 269 | 0/75 | 0/75 |
-| FinanceBench 50% | optimized | 0.240s | 0.519s | 0.944s | 587,384 | 1,188 | 34/75 | 33/75 |
+| FinanceBench 50% | baseline | 0.203s | 0.425s | 0.481s | 20,485 | 269 | 0/75 | 0/75 |
+| FinanceBench 50% | optimized | 0.240s | 0.517s | 0.944s | 587,384 | 1,188 | 34/75 | 33/75 |
 
-服务端 usage audit 中的 token 统计如下。该统计包含 OpenViking 服务端内部 embedding、VLM 摘要/处理等消耗，和 benchmark answer 阶段 token 不完全等价。
+服务端 usage audit 中的 token 统计如下。该统计包含 OpenViking 服务端内部 embedding、VLM 摘要/处理等消耗，和 benchmark answer 阶段 token 不完全等价。服务端 retrieval audit 当前只可靠记录 find 请求次数，不记录本轮 benchmark 看到的实际 URI 返回数，因此“空召回数”和“返回 URI 数”以上一张 benchmark 端表格为准。
 
 | 数据集 | 版本 | Embedding input tokens | VLM input tokens | VLM output tokens | Retrieval requests |
 |---|---|---:|---:|---:|---:|
 | LoCoMo 10% | baseline | 20,815 | 26,228 | 25,374 | 81 |
 | LoCoMo 10% | optimized | 21,232 | 26,271 | 17,339 | 96 |
 | FinanceBench 50% | baseline | 6,048 | 1,155 | 7,392 | 75 |
-| FinanceBench 50% | optimized | 689,112 | 900,168 | 271,206 | 77 |
+| FinanceBench 50% | optimized | 723,038 | 943,684 | 283,596 | 77 |
 
 ## 6. 结果分析
 
@@ -171,4 +171,3 @@ FinanceBench 的结论更明显：官方 baseline 在本轮 PDF 子集上几乎�
 
 - `/home/shuaidong/hw/locomo10_finance50_queryaware_20260821/summary/paired_metrics_summary.json`
 - `/home/shuaidong/hw/locomo10_finance50_queryaware_20260821/summary/paired_metrics_summary.md`
-
