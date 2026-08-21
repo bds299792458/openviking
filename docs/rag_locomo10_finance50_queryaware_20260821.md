@@ -130,17 +130,26 @@ FinanceBench 的结论更明显：官方 baseline 在本轮 PDF 子集上几乎�
 生成子集：
 
 ```bash
+EXP_ROOT=/home/shuaidong/hw/locomo10_finance50_queryaware_YYYYMMDD
+
 /home/shuaidong/.conda/envs/openvk/bin/python \
   /home/shuaidong/hw/OpenViking-optimized-20260819/benchmark/RAG/scripts/prepare_locomo_financebench_subsets.py \
-  --root /home/shuaidong/hw/locomo10_finance50_queryaware_20260821
+  --locomo-source /home/shuaidong/hw/original_upstream_results/rag_10pct/datasets/Locomo/locomo10.json \
+  --finance-source /home/shuaidong/hw/openviking_datasets/rag/FinanceBench/data/financebench_open_source.jsonl \
+  --finance-pdf-dir /home/shuaidong/hw/openviking_datasets/rag/FinanceBench/pdfs \
+  --output-dir "$EXP_ROOT/datasets" \
+  --seed 42 \
+  --per-finance-category 25
 ```
+
+说明：`prepare_locomo_financebench_subsets.py` 会拒绝覆盖已存在的输出目录。复跑时建议使用新的 `EXP_ROOT`，或者先人工确认旧目录不再需要后再清理。
 
 运行 baseline：
 
 ```bash
 /home/shuaidong/.conda/envs/openvk/bin/python \
   /home/shuaidong/hw/OpenViking-optimized-20260819/benchmark/RAG/scripts/run_locomo_financebench_queryaware_subsets.py \
-  --root /home/shuaidong/hw/locomo10_finance50_queryaware_20260821 \
+  --root "$EXP_ROOT" \
   --official-repo /home/shuaidong/hw/OpenViking-official-20260819 \
   --optimized-repo /home/shuaidong/hw/OpenViking-optimized-20260819 \
   --variant baseline --datasets locomo financebench --step all
@@ -151,7 +160,7 @@ FinanceBench 的结论更明显：官方 baseline 在本轮 PDF 子集上几乎�
 ```bash
 /home/shuaidong/.conda/envs/openvk/bin/python \
   /home/shuaidong/hw/OpenViking-optimized-20260819/benchmark/RAG/scripts/run_locomo_financebench_queryaware_subsets.py \
-  --root /home/shuaidong/hw/locomo10_finance50_queryaware_20260821 \
+  --root "$EXP_ROOT" \
   --official-repo /home/shuaidong/hw/OpenViking-official-20260819 \
   --optimized-repo /home/shuaidong/hw/OpenViking-optimized-20260819 \
   --variant optimized --datasets locomo financebench --step all
@@ -162,9 +171,9 @@ FinanceBench 的结论更明显：官方 baseline 在本轮 PDF 子集上几乎�
 ```bash
 /home/shuaidong/.conda/envs/openvk/bin/python \
   /home/shuaidong/hw/OpenViking-optimized-20260819/benchmark/RAG/scripts/summarize_paired_rag_results.py \
-  --root /home/shuaidong/hw/locomo10_finance50_queryaware_20260821 \
+  --root "$EXP_ROOT" \
   --datasets locomo financebench \
-  --run-dir-override optimized:financebench=/home/shuaidong/hw/locomo10_finance50_queryaware_20260821/runs/optimized/financebench_queryonly
+  --run-dir-override optimized:financebench="$EXP_ROOT/runs/optimized/financebench_queryonly"
 ```
 
 汇总产物：
