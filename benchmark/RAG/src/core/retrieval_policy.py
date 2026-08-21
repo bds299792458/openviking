@@ -29,6 +29,20 @@ RETRIEVAL_POLICIES = {
         'answer_missing_retry': False,
         'source_page_min_leaf_candidates': 2,
     },
+    "unified_query_aware": {
+        "retrieval_topk": 12,
+        "candidate_pool_topk": 20,
+        "retrieval_strategy": "query_aware",
+        "context_token_budget": 8000,
+        "max_context_chars_per_block": 8000,
+        "summary_limit": 0,
+        "query_aware_summary_limit": 1,
+        # Keep the comparison to one generation call per query, matching the
+        # official benchmark protocol while changing only retrieval packing.
+        "answer_candidate_selection": False,
+        "answer_final_refinement": False,
+        "answer_missing_retry": False,
+    },
 }
 
 
