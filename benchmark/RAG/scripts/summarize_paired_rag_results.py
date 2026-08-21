@@ -181,7 +181,7 @@ def main() -> None:
 
     md_path = output.with_suffix(".md")
     lines = [
-        "# OpenViking LoCoMo 10% / FinanceBench 50% Paired Results",
+        "# OpenViking Non-Finance 10% Paired RAG Results",
         "",
         f"Experiment root: `{args.root}`",
         "",

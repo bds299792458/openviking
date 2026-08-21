@@ -43,6 +43,12 @@ DATASETS = {
     },
 }
 
+DATASET_PORT_OFFSETS = {
+    "locomo": 0,
+    "qasper": 1,
+    "syllabusqa": 2,
+}
+
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None) -> None:
     print("+", " ".join(cmd), flush=True)
@@ -165,7 +171,7 @@ def launch_server(repo: Path, config: Path, log: Path) -> subprocess.Popen:
     env["PYTHONPATH"] = f"{repo}:{env.get('PYTHONPATH', '')}"
     cmd = [sys.executable, "-m", "openviking_cli.server_bootstrap", "--config", str(config)]
     fh = log.open("w", encoding="utf-8")
-    return subprocess.Popen(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+    return subprocess.Popen(cmd, env=env, cwd=str(repo), stdout=fh, stderr=subprocess.STDOUT)
 
 
 def stop_server(proc: subprocess.Popen | None) -> None:
@@ -223,9 +229,10 @@ def main() -> None:
     parser.add_argument("--variant", choices=["baseline", "optimized", "both"], default="both")
     parser.add_argument("--datasets", nargs="+", choices=sorted(DATASETS), default=sorted(DATASETS))
     parser.add_argument("--step", choices=["gen", "eval", "all"], default="all")
+    parser.add_argument("--base-port", type=int, default=2500)
     args = parser.parse_args()
 
-    base_port = 2500
+    base_port = args.base_port
     variants: list[tuple[str, Path, str | None, int]] = []
     if args.variant in {"baseline", "both"}:
         variants.append(("baseline", args.official_repo, None, base_port))
@@ -233,8 +240,17 @@ def main() -> None:
         variants.append(("optimized", args.optimized_repo, "unified_query_aware", base_port + 20))
 
     for variant, repo, policy, offset in variants:
-        for i, dataset in enumerate(args.datasets):
-            run_one(args.root, repo, args.official_repo, dataset, variant, offset + i, policy, args.step)
+        for dataset in args.datasets:
+            run_one(
+                args.root,
+                repo,
+                args.official_repo,
+                dataset,
+                variant,
+                offset + DATASET_PORT_OFFSETS[dataset],
+                policy,
+                args.step,
+            )
 
 
 if __name__ == "__main__":
